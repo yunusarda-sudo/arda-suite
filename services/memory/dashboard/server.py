@@ -36,6 +36,7 @@ from assets import PAGE_HTML  # noqa: E402
 from arch_page import ARCH_PAGE_HTML  # noqa: E402  — one architecture, its own URL
 import architectures  # noqa: E402  — the only module that knows the arch store
 import runner  # noqa: E402  — background agent runs
+from memory_store import normalize_get_all_response, read_inventory  # noqa: E402
 
 # --- Configuration ----------------------------------------------------------
 PORT = int(os.environ.get("MEM0_DASHBOARD_PORT", 8899))
@@ -200,11 +201,7 @@ def parse_frontmatter(path):
 
 
 def _normalize_memories(raw):
-    items = []
-    if isinstance(raw, dict):
-        items = raw.get("results", [])
-    elif isinstance(raw, list):
-        items = raw
+    items = normalize_get_all_response(raw)
     for it in items:
         if isinstance(it, dict) and "status" not in it:
             it["status"] = (it.get("metadata") or {}).get("status") or "active"
@@ -467,16 +464,12 @@ def read_health():
     return health
 
 
-# get_all()'s cap is the keyword-only `top_k` (default 20). Passing `limit=` instead
-# lands in **kwargs and is silently ignored — which is why the panel used to show 20
-# of 45 memories and the scope/agent facet counts were wrong too.
+# Bound dashboard response size after computing facets from the complete inventory.
 MEMORY_LIST_MAX = 1000
 
 
 def read_memories(scope=None, agent=None):
-    m = get_memory()
-    raw = m.get_all(filters={"user_id": USER_ID}, top_k=MEMORY_LIST_MAX)
-    items = _normalize_memories(raw)
+    items = read_inventory(owner=USER_ID, include_superseded=True)
 
     scopes = {}
     agents = {}
@@ -493,13 +486,15 @@ def read_memories(scope=None, agent=None):
 
     # newest first
     items.sort(key=lambda it: it.get("created_at") or "", reverse=True)
+    shown = items[:MEMORY_LIST_MAX]
 
     return {
-        "results": items,
+        "results": shown,
         "scopes": scopes,
         "agents": agents,
         "shared_scope": SHARED_SCOPE,
         "total": sum(scopes.values()),
+        "truncated": len(items) > MEMORY_LIST_MAX,
     }
 
 

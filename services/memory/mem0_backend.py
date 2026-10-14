@@ -242,25 +242,9 @@ def _qdrant_scroll_url(env=None):
 
 
 def _rows_local(timeout):
-    """Straight to Qdrant: no mem0 client, no embedding, no LLM. mem0's get_all()
-    silently caps at ~20 records regardless of the limit passed, which would hide
-    most of the store; scrolling avoids that."""
-    body = json.dumps({"limit": 10000, "with_payload": True}).encode()
-    req = urllib.request.Request(_qdrant_scroll_url(), data=body,
-                                 headers={"Content-Type": "application/json"},
-                                 method="POST")
-    raw = urllib.request.urlopen(req, timeout=timeout).read()
-    out = []
-    for p in json.loads(raw)["result"]["points"]:
-        pl = p.get("payload") or {}
-        if pl.get("user_id") != OWNER:
-            continue
-        out.append({"id": str(p.get("id")),
-                    "memory": pl.get("data", ""), "run_id": pl.get("run_id"),
-                    "agent_id": pl.get("agent_id"),
-                    "status": pl.get("status") or (pl.get("metadata") or {}).get("status") or "active",
-                    "created_at": pl.get("created_at", "")})
-    return out
+    """Read all local rows through the shared owner-scoped cursor reader."""
+    from memory_store import read_inventory
+    return read_inventory(owner=OWNER, include_superseded=True, timeout=timeout)
 
 
 def parse_listing(text):

@@ -215,11 +215,55 @@ class TestSkillsAndHarnessTools(unittest.TestCase):
 class TestCompactionTools(unittest.TestCase):
 
     @patch("compaction.compact_scope")
+    def test_compact_memories_delegates_scope_to_safe_inventory_consumer(self, mock_compact):
+        mock_compact.return_value = {
+            "scope": "test_scope", "dry_run": True, "clusters_found": 0,
+            "memories_compacted": 0, "syntheses": [],
+        }
+
+        ms.compact_memories(scope="test_scope", dry_run=True)
+
+        mock_compact.assert_called_once_with(scope="test_scope", dry_run=True)
+
+    @patch("compaction.compact_scope")
+    def test_compact_memories_propagates_read_error_without_reporting_empty_success(self, mock_compact):
+        from memory_store import MemoryReadError
+        mock_compact.side_effect = MemoryReadError("Qdrant unavailable")
+
+        with self.assertRaises(MemoryReadError) as raised:
+            ms.compact_memories(scope="test_scope", dry_run=True)
+
+        self.assertIn("Qdrant unavailable", str(raised.exception))
+        mock_compact.assert_not_called()
+
+    @patch("ide_bridge.evaluate_health_score")
     @patch("mcp_server._mem")
-    def test_compact_memories_tool(self, mock_mem, mock_compact):
+    @patch("mcp_server.read_inventory")
+    def test_health_propagates_read_error_without_reporting_empty_success(self, mock_inventory, mock_mem, mock_eval):
         mock_client = MagicMock()
-        mock_client.get_all.return_value = []
+        from memory_store import MemoryReadError
+        mock_inventory.side_effect = MemoryReadError("Qdrant unavailable")
         mock_mem.return_value = mock_client
+
+        with self.assertRaises(MemoryReadError) as raised:
+            ms.get_memory_health(scope="test_scope")
+
+        self.assertIn("Qdrant unavailable", str(raised.exception))
+        mock_eval.assert_not_called()
+
+    @patch("compaction.sweep_stale_memories")
+    def test_sweep_propagates_read_error_without_reporting_empty_success(self, mock_sweep):
+        from memory_store import MemoryReadError
+        mock_sweep.side_effect = MemoryReadError("Qdrant unavailable")
+
+        with self.assertRaises(MemoryReadError) as raised:
+            ms.sweep_stale_memories(scope="test_scope", dry_run=True)
+
+        self.assertIn("Qdrant unavailable", str(raised.exception))
+        mock_sweep.assert_not_called()
+
+    @patch("compaction.compact_scope")
+    def test_compact_memories_tool(self, mock_compact):
         mock_compact.return_value = {
             "scope": "test_scope",
             "dry_run": True,
@@ -236,15 +280,11 @@ class TestCompactionTools(unittest.TestCase):
 
         output = ms.compact_memories(scope="test_scope", dry_run=True)
         self.assertIn("Memory Compaction [DRY-RUN] for scope 'test_scope'", output)
-        self.assertIn("Found 1 clusters (2 memories compacted)", output)
+        self.assertIn("Found 1 clusters (2 memories would be superseded)", output)
         self.assertIn("Consolidated Architectural Note", output)
 
     @patch("compaction.sweep_stale_memories")
-    @patch("mcp_server._mem")
-    def test_sweep_stale_memories_tool(self, mock_mem, mock_sweep):
-        mock_client = MagicMock()
-        mock_client.get_all.return_value = []
-        mock_mem.return_value = mock_client
+    def test_sweep_stale_memories_tool(self, mock_sweep):
         mock_sweep.return_value = {
             "scope": "test_scope",
             "workspace_dir": "/tmp/test",

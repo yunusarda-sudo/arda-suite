@@ -18,6 +18,31 @@ import assets
 
 class TestAssistantDashboardIntegration(unittest.TestCase):
 
+    @patch("server.read_inventory")
+    def test_memory_inventory_uses_owner_scoped_inventory_and_applies_filters(self, mock_inventory):
+        mock_inventory.return_value = [
+            {"id": "one", "memory": "first", "run_id": "proj-a", "agent_id": "claude"},
+            {"id": "two", "memory": "second", "run_id": "proj-b", "agent_id": "codex"},
+        ]
+
+        result = server.read_memories(scope="proj-a")
+
+        self.assertEqual([row["id"] for row in result["results"]], ["one"])
+        self.assertEqual(result["total"], 2)
+        self.assertEqual(result["scopes"], {"proj-a": 1, "proj-b": 1})
+        mock_inventory.assert_called_once_with(
+            owner=server.USER_ID, include_superseded=True
+        )
+
+    @patch("server.read_inventory")
+    def test_memory_inventory_error_is_not_reported_as_empty(self, mock_inventory):
+        from memory_store import MemoryReadError
+
+        mock_inventory.side_effect = MemoryReadError("Qdrant unavailable")
+
+        with self.assertRaisesRegex(MemoryReadError, "Qdrant unavailable"):
+            server.read_memories()
+
     def test_assets_markup_and_script_wiring(self):
         html = assets.PAGE_HTML
         self.assertIn('data-view="assistant"', html)

@@ -38,44 +38,14 @@ import tokens as tokens_store
 import graph_store
 import skills_engine
 import harness as harness_runner
+from memory_store import read_inventory
 
 OWNER = os.environ.get("MEM0_OWNER", "default")
-# mem0's get_all() caps results (~20) regardless of limit, hiding records once the
-# store grows. Scroll Qdrant directly for list/log/rm so they stay reliable. mem0
-# flattens custom metadata to the payload top level, so `type` lives at pl["type"].
-_q_host = os.environ.get("MEM0_QDRANT_HOST", "localhost")
-_q_port = os.environ.get("MEM0_QDRANT_PORT", "6333")
-QDRANT_SCROLL = f"http://{_q_host}:{_q_port}/collections/mem0_local/points/scroll"
-
-
 def _scroll(scope="", agent="", mtype="", include_superseded=False):
-    body = json.dumps({"limit": 10000, "with_payload": True}).encode()
-    req = urllib.request.Request(QDRANT_SCROLL, data=body,
-                                 headers={"Content-Type": "application/json"}, method="POST")
-    try:
-        pts = json.loads(urllib.request.urlopen(req, timeout=10).read())["result"]["points"]
-    except Exception as ex:
-        print(f"  warning: unable to reach Qdrant ({ex})", file=sys.stderr)
-        return []
-    out = []
-    for p in pts:
-        pl = p.get("payload", {})
-        if pl.get("user_id") != OWNER:
-            continue
-        if scope and pl.get("run_id") != scope:
-            continue
-        if agent and pl.get("agent_id") != agent:
-            continue
-        if mtype and pl.get("type") != mtype:
-            continue
-        status = pl.get("status") or (pl.get("metadata") or {}).get("status") or "active"
-        if not include_superseded and status == "superseded":
-            continue
-        out.append({"id": str(p["id"]), "memory": pl.get("data", ""),
-                    "run_id": pl.get("run_id"), "agent_id": pl.get("agent_id"),
-                    "status": status,
-                    "created_at": pl.get("created_at", "")})
-    return out
+    return read_inventory(
+        owner=OWNER, scope=scope or None, agent=agent or None,
+        memory_type=mtype or None, include_superseded=include_superseded,
+    )
 
 
 
@@ -253,44 +223,63 @@ def _harness_command(args) -> int:
 
 def _compact_command(args) -> int:
     import compaction
-    memories = _scroll(scope=args.scope, include_superseded=False)
     res = compaction.compact_scope(
         scope=args.scope,
         dry_run=args.dry_run,
         min_cluster_size=args.min_cluster,
-        memories=memories,
     )
-    mode = "[DRY-RUN]" if res["dry_run"] else "[APPLIED]"
+    mode = {
+        "preview": "[DRY-RUN]",
+        "completed": "[APPLIED]",
+        "partial": "[PARTIAL]",
+        "error": "[FAILED]",
+        "no-op": "[NO-OP]",
+    }.get(res.get("status"), "[DRY-RUN]" if res["dry_run"] else "[APPLIED]")
     print(f"  Compaction {mode} in scope '{res['scope']}':")
-    print(f"  found {res['clusters_found']} clusters ({res['memories_compacted']} memories compacted)")
+    if res["dry_run"]:
+        print(f"  found {res['clusters_found']} clusters ({res['would_supersede']} memories would be superseded)")
+    else:
+        print(f"  found {res['clusters_found']} clusters ({res['memories_compacted']} memories superseded)")
     for s in res["syntheses"]:
-        print("\n  --- Synthesis ---")
+        print(f"\n  --- Synthesis [{s.get('status', 'unknown')}] ---")
         for line in s["synthesis"].splitlines():
             print(f"  {line}")
         print(f"  consolidated {s['count']} memories: {', '.join(s['superseded_ids'])}")
         if s.get("new_id"):
             print(f"  new memory ID: {s['new_id']}")
+        if s.get("error"):
+            print(f"  error: {s['error']}")
+        if s.get("graph_error"):
+            print(f"  knowledge graph update failed: {s['graph_error']}")
+        for failure in s.get("supersession_errors", []):
+            print(f"  failed to supersede {failure['id']}: {failure['error']}")
     return 0
 
 
 def _sweep_command(args) -> int:
     import compaction
-    memories = _scroll(scope=args.scope, include_superseded=False)
     res = compaction.sweep_stale_memories(
         scope=args.scope,
         workspace_dir=args.workspace,
         dry_run=args.dry_run,
-        memories=memories,
     )
-    mode = "[DRY-RUN]" if res["dry_run"] else "[APPLIED]"
+    mode = {
+        "preview": "[DRY-RUN]", "completed": "[APPLIED]", "partial": "[PARTIAL]",
+        "error": "[FAILED]", "no-op": "[NO-OP]",
+    }.get(res.get("status"), "[DRY-RUN]" if res["dry_run"] else "[APPLIED]")
     print(f"  Staleness Sweeper {mode} in scope '{res['scope']}':")
     print(f"  audited against workspace: {res['workspace_dir']}")
-    print(f"  stale candidates found: {res['stale_count']}")
+    if res["dry_run"]:
+        print(f"  stale candidates found: {res['stale_count']} (would update {res['stale_count']})")
+    else:
+        print(f"  stale candidates found: {res['stale_count']} (updated {res['updated_count']}, failed {res['failed_count']})")
     for c in res["candidates"]:
         mid = (c.get("id") or "")[:8]
         missing = ", ".join(c.get("missing_files", []))
         print(f"  - [{mid}] missing: {missing}")
         print(f"    text: {c.get('memory', '')[:70]}")
+        if "update_error" in c:
+            print(f"    update failed: {c['update_error']}")
     return 0
 
 

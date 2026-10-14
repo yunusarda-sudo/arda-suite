@@ -16,6 +16,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Optional
 
+from memory_store import MemoryReadError, read_inventory
+
 
 def extract_keywords(text: str) -> set[str]:
     """Extracts significant alphanumeric keywords (length >= 4) from memory text."""
@@ -192,8 +194,8 @@ def get_memory_client():
     try:
         from config import get_memory
         return get_memory()
-    except Exception:
-        return None
+    except Exception as exc:
+        raise MemoryReadError(f"unable to initialize memory store: {exc}") from exc
 
 
 def compact_scope(
@@ -203,21 +205,19 @@ def compact_scope(
     memories: Optional[list[dict]] = None,
 ) -> dict:
     """Finds clusters of memories in scope and consolidates them into synthesized notes."""
-    client = get_memory_client()
-
+    if not (scope or "").strip():
+        raise ValueError("scope is required for memory compaction")
+    if memories is not None and not dry_run:
+        raise ValueError("live compaction must read its own owner-scoped inventory")
     if memories is None:
-        if client:
-            try:
-                owner = os.environ.get("MEM0_OWNER", "default")
-                all_mem = client.get_all(user_id=owner) or []
-                if scope:
-                    all_mem = [m for m in all_mem if m.get("run_id") == scope]
-            except Exception:
-                all_mem = []
-        else:
-            all_mem = []
+        owner = os.environ.get("MEM0_OWNER", "default")
+        all_mem = read_inventory(owner=owner, scope=scope, include_superseded=True)
+        client = get_memory_client() if not dry_run else None
     else:
         all_mem = memories
+        client = get_memory_client() if not dry_run else None
+    if not dry_run and not client:
+        raise MemoryReadError("memory store client is unavailable for live compaction")
 
 
     clusters = cluster_memories(all_mem, min_cluster_size=min_cluster_size)
@@ -230,9 +230,12 @@ def compact_scope(
             "synthesis": synthesis,
             "superseded_ids": old_ids,
             "count": len(cluster),
+            "status": "preview" if dry_run else "pending",
+            "superseded_count": 0,
+            "would_supersede": len(old_ids) if dry_run else 0,
         }
 
-        if not dry_run and client:
+        if not dry_run:
             try:
                 owner = os.environ.get("MEM0_OWNER", "default")
                 # 1. Add synthesized memory
@@ -247,15 +250,19 @@ def compact_scope(
                     new_id = str(add_res[0].get("id") or "")
                 elif isinstance(add_res, dict):
                     new_id = str(add_res.get("id") or "")
+                if not new_id:
+                    raise RuntimeError("memory store did not return an ID for the synthesis")
 
                 # 2. Mark old memories as superseded
+                supersession_errors = []
                 for oid in old_ids:
                     try:
                         client.update(oid, metadata={"status": "superseded", "superseded_by": new_id})
-                    except Exception:
-                        pass
+                    except Exception as ex:
+                        supersession_errors.append({"id": oid, "error": str(ex)})
 
                 # 3. Update knowledge graph
+                graph_error = None
                 try:
                     import graph_store
                     if new_id:
@@ -263,20 +270,44 @@ def compact_scope(
                         for oid in old_ids:
                             graph_store.add_edge(f"mem:{oid}", f"mem:{new_id}", relation="consolidated_into")
                         graph_store.sync_memory_links(new_id, synthesis, metadata={"status": "active"}, scope=scope)
-                except Exception:
-                    pass
+                except Exception as ex:
+                    graph_error = str(ex)
 
                 res_entry["new_id"] = new_id
+                if graph_error is not None:
+                    res_entry["graph_error"] = graph_error
+                if supersession_errors or graph_error is not None:
+                    res_entry["status"] = "partial"
+                else:
+                    res_entry["status"] = "completed"
+                if supersession_errors:
+                    res_entry["supersession_errors"] = supersession_errors
+                res_entry["superseded_count"] = len(old_ids) - len(supersession_errors)
             except Exception as ex:
+                res_entry["status"] = "error"
                 res_entry["error"] = str(ex)
 
         results.append(res_entry)
 
+    statuses = [entry["status"] for entry in results]
+    if dry_run:
+        overall_status = "preview"
+    elif not statuses:
+        overall_status = "no-op"
+    elif "error" in statuses and not any(status in ("completed", "partial") for status in statuses):
+        overall_status = "error"
+    elif "error" in statuses or "partial" in statuses:
+        overall_status = "partial"
+    else:
+        overall_status = "completed"
+
     return {
         "scope": scope,
         "dry_run": dry_run,
+        "status": overall_status,
         "clusters_found": len(clusters),
-        "memories_compacted": sum(len(c) for c in clusters),
+        "memories_compacted": sum(entry["superseded_count"] for entry in results),
+        "would_supersede": sum(entry["would_supersede"] for entry in results),
         "syntheses": results,
     }
 
@@ -288,22 +319,20 @@ def sweep_stale_memories(
     memories: Optional[list[dict]] = None,
 ) -> dict:
     """Audits memories referencing specific source files and flags them if the files no longer exist."""
+    if not (scope or "").strip():
+        raise ValueError("scope is required for stale memory sweeping")
+    if memories is not None and not dry_run:
+        raise ValueError("live stale sweeping must read its own owner-scoped inventory")
     ws = Path(workspace_dir).resolve() if workspace_dir else Path(".").resolve()
-    client = get_memory_client()
-
     if memories is None:
-        if client:
-            try:
-                owner = os.environ.get("MEM0_OWNER", "default")
-                all_mem = client.get_all(user_id=owner) or []
-                if scope:
-                    all_mem = [m for m in all_mem if m.get("run_id") == scope]
-            except Exception:
-                all_mem = []
-        else:
-            all_mem = []
+        owner = os.environ.get("MEM0_OWNER", "default")
+        all_mem = read_inventory(owner=owner, scope=scope, include_superseded=True)
+        client = get_memory_client() if not dry_run else None
     else:
         all_mem = memories
+        client = get_memory_client() if not dry_run else None
+    if not dry_run and not client:
+        raise MemoryReadError("memory store client is unavailable for live stale sweeping")
 
     active = [m for m in all_mem if (m.get("metadata") or {}).get("status") != "superseded" and m.get("status") != "superseded"]
     stale_candidates = []
@@ -340,10 +369,26 @@ def sweep_stale_memories(
             stale_candidates.append(entry)
 
 
+    updated_count = sum(1 for entry in stale_candidates if entry.get("status_updated") == "stale")
+    failed_count = sum(1 for entry in stale_candidates if "update_error" in entry)
+    if dry_run:
+        status = "preview"
+    elif not stale_candidates:
+        status = "no-op"
+    elif failed_count and not updated_count:
+        status = "error"
+    elif failed_count:
+        status = "partial"
+    else:
+        status = "completed"
+
     return {
         "scope": scope,
         "workspace_dir": str(ws),
         "dry_run": dry_run,
+        "status": status,
         "stale_count": len(stale_candidates),
+        "updated_count": updated_count,
+        "failed_count": failed_count,
         "candidates": stale_candidates,
     }

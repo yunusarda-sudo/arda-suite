@@ -13,6 +13,8 @@ import re
 from pathlib import Path
 from typing import Optional
 
+from memory_store import read_inventory
+
 MEM0_ROOT = Path(__file__).resolve().parent
 
 
@@ -271,15 +273,9 @@ def evaluate_health_score(
     ws = Path(workspace_dir).resolve() if workspace_dir else Path(".").resolve()
 
     if memories is None:
-        try:
-            from config import get_memory
-            client = get_memory()
-            owner = os.environ.get("MEM0_OWNER", "default")
-            all_mem = client.get_all(user_id=owner) or []
-            if scope:
-                all_mem = [m for m in all_mem if m.get("run_id") == scope]
-        except Exception:
-            all_mem = []
+        owner = os.environ.get("MEM0_OWNER", "default")
+        all_mem = read_inventory(owner=owner, scope=scope or None,
+                                 include_superseded=True)
     else:
         all_mem = memories
 

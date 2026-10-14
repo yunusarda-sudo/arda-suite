@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import ide_bridge
+import memory_store
 
 
 class TestIDEBridge(unittest.TestCase):
@@ -18,6 +19,19 @@ class TestIDEBridge(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    @patch.dict("os.environ", {"MEM0_OWNER": "test-owner"})
+    @patch("ide_bridge.read_inventory")
+    def test_health_raises_when_memory_read_fails(self, mock_inventory):
+        from unittest.mock import MagicMock
+
+        mock_inventory.side_effect = memory_store.MemoryReadError("Qdrant unavailable")
+        with self.assertRaises(memory_store.MemoryReadError) as raised:
+            ide_bridge.evaluate_health_score(scope="target", workspace_dir=str(self.ws))
+
+        self.assertIn("Qdrant unavailable", str(raised.exception))
+        mock_inventory.assert_called_once_with(owner="test-owner", scope="target",
+                                               include_superseded=True)
 
     @patch("rules.list_rules")
     def test_sync_cursor_rules(self, mock_rules):
