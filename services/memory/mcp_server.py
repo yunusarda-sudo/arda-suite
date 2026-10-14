@@ -513,14 +513,12 @@ def list_available_skills(task_context: str = "") -> str:
 
 @mcp.tool()
 def execute_with_harness(task: str, scope: str = "personal", verify_command: str = "") -> str:
-    """Run an agent task through the evaluation and safety harness.
-    Pre-checks command safety, injects relevant memories, rules, and skills,
-    records execution trajectory, and triggers self-reflexion if verification fails.
+    """Prepare scoped context and record a trajectory without executing the task.
 
     Args:
         task: The task description or goal for the agent.
         scope: Memory and rule scope (default: 'personal').
-        verify_command: Optional bash test/verification command to evaluate task outcome.
+        verify_command: Deprecated compatibility argument; never executed.
     """
     import harness
     result = harness.run_harness_task(
@@ -530,30 +528,23 @@ def execute_with_harness(task: str, scope: str = "personal", verify_command: str
     )
     status = result.get("status", "unknown").upper()
     run_id = result.get("run_id", "")
-    safety = "PASS" if result.get("safety_passed") else "BLOCKED"
-
     output = [
         f"Harness Execution [{status}] (run_id: {run_id})",
-        f"Safety Pre-Check: {safety}",
+        "Safety Review: NOT PERFORMED (task execution is disabled)",
+        "Task Execution: NOT PERFORMED (no trusted executor is configured)",
+        "Verification: NOT RUN",
     ]
 
-    if result.get("safety_violation"):
-        output.append(f"Safety Violation: {result.get('safety_violation')}")
-
-    if verify_command:
-        ver_status = "PASS" if result.get("verification_passed") else "FAIL"
-        output.append(f"Verification ({verify_command}): {ver_status}")
-        if result.get("verification_output"):
-            output.append(f"Verification Output:\n{result.get('verification_output').strip()}")
-
-    if result.get("reflexion_triggered"):
-        output.append("[REFLEXION] Verification failed. Self-correction memory recorded.")
+    if result.get("message"):
+        output.append(result["message"])
 
     context = result.get("context", {})
     output.append(
-        f"Assembled Context: {len(context.get('memories', []))} memories, "
-        f"{len(context.get('rules', []))} rules, {len(context.get('skills', []))} skills, "
-        f"{len(context.get('graph_nodes', []))} graph nodes."
+        "Context availability: "
+        f"memories={bool(context.get('memories'))}, "
+        f"rules={bool(context.get('rules'))}, skills={bool(context.get('skills'))}, "
+        f"graph_nodes={len(context.get('graph', []))}; "
+        f"context_status={context.get('status', 'unknown')}"
     )
 
     return "\n".join(output)

@@ -200,16 +200,19 @@ class TestSkillsAndHarnessTools(unittest.TestCase):
             verify_command="echo 'checks passed'",
         )
         self.assertIn("Harness Execution", output)
-        self.assertIn("Safety Pre-Check: PASS", output)
-        self.assertIn("Verification (echo 'checks passed'): PASS", output)
+        self.assertIn("[NOT_EXECUTED]", output)
+        self.assertIn("Safety Review: NOT PERFORMED", output)
+        self.assertNotIn("Verification (echo 'checks passed'): PASS", output)
+        self.assertNotIn("Self-correction memory recorded", output)
 
-    def test_execute_with_harness_blocked(self):
+    def test_execute_with_harness_does_not_claim_safety_scan(self):
         output = ms.execute_with_harness(
             task="Delete everything rm -rf /",
             scope="test_proj",
         )
-        self.assertIn("Safety Pre-Check: BLOCKED", output)
-        self.assertIn("Safety Violation", output)
+        self.assertIn("[NOT_EXECUTED]", output)
+        self.assertIn("Safety Review: NOT PERFORMED", output)
+        self.assertNotIn("Safety Violation", output)
 
 
 class TestCompactionTools(unittest.TestCase):

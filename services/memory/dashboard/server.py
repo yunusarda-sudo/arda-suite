@@ -1666,10 +1666,12 @@ class Handler(BaseHTTPRequestHandler):
         traceback.print_exc()
         self._send_json({"error": str(exc), "type": type(exc).__name__}, status=status)
 
-    def _read_body(self):
+    def _read_body(self, max_bytes=1_048_576):
         length = int(self.headers.get("Content-Length", 0) or 0)
         if not length:
             return {}
+        if length > max_bytes:
+            raise ValueError(f"request body exceeds the {max_bytes} byte limit")
         raw = self.rfile.read(length)
         try:
             return json.loads(raw.decode("utf-8"))
@@ -1872,14 +1874,18 @@ class Handler(BaseHTTPRequestHandler):
                     priority=body.get("priority", architectures.TASK_PRIORITY_DEFAULT),
                 ), status=201)
             if parsed.path == "/api/harness/run":
-                body = self._read_body()
+                body = self._read_body(max_bytes=100_000)
                 task = (body.get("task") or "").strip()
                 if not task:
                     return self._send_json({"error": "task is required"}, status=400)
+                if len(task) > 20_000:
+                    return self._send_json({"error": "task exceeds the 20000 character limit"}, status=413)
                 scope = body.get("scope") or SHARED_SCOPE
+                if len(scope) > 256:
+                    return self._send_json({"error": "scope exceeds the 256 character limit"}, status=413)
                 verify = body.get("verify_command") or body.get("verify")
                 res = run_harness_execution(task, scope=scope, verify_command=verify, cwd=body.get("cwd"))
-                # Return 200 even on safety block, with status="blocked" in JSON payload for UI interceptor
+                # Preparation status is returned in the payload; no task is executed here.
                 return self._send_json(res, status=200)
             return self._send_json({"error": "not found"}, status=404)
         except PermissionError as e:

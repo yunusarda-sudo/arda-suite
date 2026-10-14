@@ -3022,13 +3022,10 @@ async function loadHarness() {
             <label for="harness-scope">Project Scope</label>
             <input type="text" id="harness-scope" value="mem0-local" placeholder="e.g. mem0-local, personal">
           </div>
-          <div class="harness-form-group">
-            <label for="harness-verify">Verification Command (Optional)</label>
-            <input type="text" id="harness-verify" value="./bin/mem0-python -m unittest discover -p 'test_*.py'" placeholder="e.g. pytest, npm test">
-          </div>
+          <div class="empty-note">Task execution and verification are unavailable until a trusted executor is configured.</div>
         </div>
         <div class="harness-actions">
-          <button class="btn primary" id="harness-run-btn">▶ Run under Harness</button>
+          <button class="btn primary" id="harness-run-btn">▶ Prepare Harness Context</button>
           <button class="btn ghost" id="harness-inspect-btn">🔍 Inspect Pre-flight Context</button>
         </div>
         <div id="harness-alert-box" style="display:none;"></div>
@@ -3154,7 +3151,6 @@ async function inspectHarnessContext() {
 async function executeHarnessRun() {
   const task = ($('#harness-task').value || '').trim();
   const scope = ($('#harness-scope').value || 'personal').trim();
-  const verify = ($('#harness-verify').value || '').trim();
   const alertBox = $('#harness-alert-box');
   const terminal = $('#harness-terminal');
   const stepsContainer = $('#harness-steps');
@@ -3167,21 +3163,21 @@ async function executeHarnessRun() {
   }
 
   btn.disabled = true;
-  btn.textContent = '⏳ Executing…';
+  btn.textContent = '⏳ Preparing…';
   alertBox.style.display = 'none';
   statusPill.textContent = 'Running';
   statusPill.className = 'arch-badge active';
-  terminal.textContent = `[HARNESS START] Task: "${task}"\nScope: ${scope}\nAssembling pre-flight context and checking guardrails…\n`;
+  terminal.textContent = `[HARNESS START] Task: "${task}"\nScope: ${scope}\nAttempting pre-flight context assembly…\n`;
 
   try {
     const res = await api('/api/harness/run', {
       method: 'POST',
-      body: JSON.stringify({ task, scope, verify_command: verify }),
+      body: JSON.stringify({ task, scope }),
     });
 
     currentHarnessRunId = res.run_id;
 
-    if (!res.safety_passed) {
+    if (res.status === 'blocked') {
       statusPill.textContent = 'Blocked by Safety';
       statusPill.className = 'arch-badge completed';
       alertBox.className = 'harness-alert';
@@ -3190,20 +3186,17 @@ async function executeHarnessRun() {
         <strong>⚠️ SAFETY GUARDRAIL VIOLATION INTERCEPTED</strong>
         <span>${esc(res.safety_violation || 'Dangerous command blocked')}</span>
       `;
-      terminal.textContent += `\n[BLOCKED] Safety guardrail tripped! Execution aborted for data protection.\n`;
+      terminal.textContent += `\n[BLOCKED] Harness did not proceed.\n`;
     } else {
-      statusPill.textContent = res.verification_passed ? 'Verified PASS' : (res.verified ? 'Verification FAILED' : 'Completed');
-      statusPill.className = res.verification_passed ? 'arch-badge active' : 'arch-badge paused';
-      alertBox.className = res.verification_passed ? 'harness-alert pass' : 'harness-alert';
+      statusPill.textContent = 'Not executed';
+      statusPill.className = 'arch-badge paused';
+      alertBox.className = 'harness-alert';
       alertBox.style.display = 'flex';
       alertBox.innerHTML = `
-        <strong>${res.verification_passed ? '✅ HARNESS RUN VERIFIED' : '⚡ HARNESS EXECUTION COMPLETED'}</strong>
-        <span>Run ID: ${esc(res.run_id)} | Status: ${esc(res.status)} | Verified: ${res.verified ? (res.verification_passed ? 'PASS' : 'FAIL') : 'None'}</span>
+        <strong>⚡ CONTEXT ASSEMBLY ATTEMPTED · TASK NOT EXECUTED</strong>
+        <span>Run ID: ${esc(res.run_id)} | Status: ${esc(res.status)} | Verification: NOT RUN</span>
       `;
-      terminal.textContent += `\n[COMPLETED] Run ID: ${res.run_id}\n`;
-      if (res.verification_output) {
-        terminal.textContent += `\n--- Verification Output ---\n${res.verification_output}\n`;
-      }
+      terminal.textContent += `\n[NOT EXECUTED] Run ID: ${res.run_id}\n${res.message || 'No trusted task executor is configured.'}\n`;
     }
 
     if (res.run_id) {
@@ -3217,7 +3210,7 @@ async function executeHarnessRun() {
     toast('Harness execution failed: ' + e.message, true);
   } finally {
     btn.disabled = false;
-    btn.textContent = '▶ Run under Harness';
+    btn.textContent = '▶ Prepare Harness Context';
   }
 }
 

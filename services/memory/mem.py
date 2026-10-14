@@ -243,11 +243,13 @@ def _harness_command(args) -> int:
             scope=args.scope,
             verify_command=args.verify,
         )
-        status = "PASSED" if res["verified"] else "FINISHED"
+        status = "NOT EXECUTED" if not res.get("execution_performed") else ("PASSED" if res["verified"] else "FAILED")
         print(f"  Harness [{status}] run_id={res['run_id']}")
+        print(f"  verification: {res.get('verification_status', 'not_run')}")
         print(f"  trajectory: {res['trajectory_file']}")
         ctx = res["context"]
-        print(f"  context assembled: memories={bool(ctx['memories'])}, rules={bool(ctx['rules'])}, skills={bool(ctx['skills'])}")
+        print(f"  context status: {ctx.get('status', 'unknown')} (memories={bool(ctx['memories'])}, rules={bool(ctx['rules'])}, skills={bool(ctx['skills'])})")
+        return 0 if res.get("execution_performed") else 3
     return 0
 
 
@@ -504,9 +506,9 @@ def main() -> int:
     skc = sksub.add_parser("check", help="test which skills match a task description")
     skc.add_argument("task", help="task description or prompt")
 
-    hn = sub.add_parser("harness", help="agent execution & evaluation harness")
+    hn = sub.add_parser("harness", help="context preparation and trajectory harness")
     hnsub = hn.add_subparsers(dest="harness_cmd", required=True)
-    hnr = hnsub.add_parser("run", help="run a task under harness supervision")
+    hnr = hnsub.add_parser("run", help="prepare context without executing a task")
     hnr.add_argument("task", help="task description")
     hnr.add_argument("--scope", default="personal")
     hnr.add_argument("--verify", default=None, help="command to verify task success (e.g. pytest)")
