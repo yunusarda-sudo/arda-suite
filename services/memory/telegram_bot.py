@@ -34,6 +34,7 @@ logging.basicConfig(
 logger = logging.getLogger("telegram_bot")
 
 TELEGRAM_API_BASE = "https://api.telegram.org/bot"
+UNAUTHORIZED_MESSAGE = "⛔ Yetkisiz erişim. Bu bot yalnızca yetkili kullanıcılar için yapılandırılmıştır."
 
 # In-memory per-chat active scopes: chat_id -> scope
 CHAT_SCOPES: Dict[int, str] = {}
@@ -58,8 +59,8 @@ def is_user_allowed(user_id: int, username: Optional[str]) -> bool:
     """Check if the requesting Telegram user is in the whitelist."""
     allowed = get_allowed_users()
     if not allowed:
-        # If no whitelist is configured, allow all (or warn)
-        return True
+        # Missing configuration must never grant access to the shared memory.
+        return False
     if str(user_id) in allowed:
         return True
     if username and username.lower().lstrip("@") in allowed:
@@ -184,7 +185,7 @@ def handle_message(text: str, user_id: int, username: Optional[str], chat_id: in
 
     if not is_user_allowed(user_id, username):
         logger.warning("Unauthorized access attempt from user_id=%s username=%s", user_id, username)
-        return "⛔ Yetkisiz erişim. Bu bot yalnızca yetkili kullanıcılar için yapılandırılmıştır."
+        return UNAUTHORIZED_MESSAGE
 
     scope = get_chat_scope(chat_id)
 
@@ -325,7 +326,7 @@ def run_polling_loop():
     if allowed_users:
         logger.info("Whitelist enabled for: %s", ", ".join(allowed_users))
     else:
-        logger.warning("No TELEGRAM_ALLOWED_USERS specified; bot will accept messages from any user.")
+        logger.warning("No TELEGRAM_ALLOWED_USERS specified; all incoming messages will be denied.")
 
     offset = 0
     consecutive_errors = 0
@@ -364,6 +365,12 @@ def run_polling_loop():
                 username = from_user.get("username")
 
                 if not chat_id:
+                    continue
+
+                # Reject unauthorized updates before downloading or transcribing voice messages.
+                if not is_user_allowed(user_id, username):
+                    logger.warning("Unauthorized access attempt from user_id=%s username=%s", user_id, username)
+                    send_message(chat_id, UNAUTHORIZED_MESSAGE, token=token)
                     continue
 
                 # Voice note transcription support

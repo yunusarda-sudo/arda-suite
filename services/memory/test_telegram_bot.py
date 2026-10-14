@@ -17,22 +17,63 @@ class TestTelegramBot(unittest.TestCase):
     def setUp(self):
         telegram_bot.CHAT_SCOPES.clear()
         telegram_bot.CHAT_HISTORY.clear()
+        self.allowed_users_patcher = patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "1"})
+        self.allowed_users_patcher.start()
+
+    def tearDown(self):
+        self.allowed_users_patcher.stop()
+
+    def test_empty_or_unset_whitelist_denies_users(self):
+        with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": ""}):
+            self.assertFalse(telegram_bot.is_user_allowed(999, "anybody"))
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(telegram_bot.is_user_allowed(999, "anybody"))
 
     def test_user_authorization_whitelist(self):
-        with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "123456,example-user,alice"}):
+        with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "123456,example_user,alice"}):
             self.assertTrue(telegram_bot.is_user_allowed(123456, None))
-            self.assertTrue(telegram_bot.is_user_allowed(999, "example-user"))
-            self.assertTrue(telegram_bot.is_user_allowed(999, "@Example User"))
+            self.assertTrue(telegram_bot.is_user_allowed(999, "example_user"))
+            self.assertTrue(telegram_bot.is_user_allowed(999, "@Example_User"))
             self.assertFalse(telegram_bot.is_user_allowed(999, "mallory"))
 
-        # Empty whitelist allows all
-        with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": ""}):
-            self.assertTrue(telegram_bot.is_user_allowed(999, "anybody"))
+    def test_authorization_denies_unlisted_id_and_allows_listed_id(self):
+        with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "123456"}):
+            self.assertFalse(telegram_bot.is_user_allowed(999999, "intruder"))
+            self.assertTrue(telegram_bot.is_user_allowed(123456, None))
 
     def test_unauthorized_user_message_rejected(self):
         with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "123456"}):
             resp = telegram_bot.handle_message("Hello", user_id=999999, username="intruder", chat_id=10)
             self.assertIn("Yetkisiz erişim", resp)
+
+    def test_unauthorized_voice_update_is_rejected_before_audio_processing(self):
+        updates = {
+            "ok": True,
+            "result": [{
+                "update_id": 1,
+                "message": {
+                    "voice": {"file_id": "private-audio-file"},
+                    "chat": {"id": 10},
+                    "from": {"id": 999999, "username": "intruder"},
+                },
+            }],
+        }
+
+        with (
+            patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_ALLOWED_USERS": "123456"}),
+            patch.object(telegram_bot, "call_telegram_api", side_effect=[updates, KeyboardInterrupt]),
+            patch.object(telegram_bot, "download_telegram_file") as download,
+            patch.object(telegram_bot, "transcribe_audio_bytes") as transcribe,
+            patch.object(telegram_bot, "send_message") as send,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                telegram_bot.run_polling_loop()
+
+        download.assert_not_called()
+        transcribe.assert_not_called()
+        send.assert_called_once()
+        self.assertIn("Yetkisiz erişim", send.call_args.args[1])
 
     def test_start_and_help_commands(self):
         resp = telegram_bot.handle_message("/start", user_id=1, username="test", chat_id=10)
