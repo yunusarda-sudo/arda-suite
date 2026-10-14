@@ -148,8 +148,25 @@ def load_tokens(env=None):
     return {token: {"user_id": env.get("MEM0_OWNER", "default"), "client_id": "mem0-local"}}
 
 
+def validate_token_registry(token_map, owner):
+    """Reject token claims that the single-owner memory tools do not enforce."""
+    if not isinstance(token_map, dict) or not token_map:
+        raise ConfigError("HTTP token registry must contain at least one token")
+    for token, meta in token_map.items():
+        if not isinstance(token, str) or len(token) < MIN_TOKEN_LEN or not isinstance(meta, dict):
+            raise ConfigError("HTTP token registry contains an invalid entry")
+        if meta.get("user_id", owner) != owner:
+            raise ValueError("HTTP token registry user_id must match MEM0_OWNER")
+        scopes = meta.get("scopes") or []
+        if not isinstance(scopes, list) or scopes:
+            raise ValueError("HTTP token scopes are not enforced; use an empty scopes list")
+        if meta.get("role") not in (None, "developer"):
+            raise ValueError("HTTP token role is not enforced; only developer is supported")
+    return token_map
+
+
 class MultiTokenVerifier:
-    """FastMCP TokenVerifier supporting multiple client tokens / tenants."""
+    """FastMCP TokenVerifier for same-owner credential rotation."""
 
     def __init__(self, token_map, default_client_id="mem0-local"):
         self._tokens = token_map or {}
@@ -287,7 +304,8 @@ def build_server(fastmcp_cls, name, argv=None, env=None):
     from mcp.server.auth.settings import AuthSettings
 
     host, port = http_bind(env)
-    tokens = load_tokens(env)
+    env = os.environ if env is None else env
+    tokens = validate_token_registry(load_tokens(env), env.get("MEM0_OWNER", "default"))
     base = "http://%s:%d" % (host, port)
     # No authorization server actually runs here; tokens are issued out of band
     # (you write one into the token file). These URLs only populate the RFC 9728

@@ -49,11 +49,13 @@ fi
 
 echo -e "\n${BOLD}[2/7] Checking Docker & Qdrant Vector Store...${NC}"
 if ! command -v docker >/dev/null 2>&1; then
-  echo -e "${BLUE}Installing Docker...${NC}"
-  curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
-  sudo sh /tmp/get-docker.sh
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "Docker is missing. Install it from your distribution's signed package repository, then rerun." >&2
+    exit 1
+  fi
+  echo -e "${BLUE}Installing Docker from the configured signed apt repositories...${NC}"
+  sudo apt-get install -y docker.io
   sudo usermod -aG docker "$CURRENT_USER" || true
-  rm -f /tmp/get-docker.sh
   echo -e "${GREEN}✓ Docker installed.${NC}"
 fi
 
@@ -78,15 +80,14 @@ else
     --restart always \
     -p 127.0.0.1:6333:6333 \
     -v "$MEM0_DIR/qdrant_storage:/qdrant/storage" \
-    qdrant/qdrant:latest
+    qdrant/qdrant:v1.19.2
   echo -e "${GREEN}✓ Qdrant container running on port 6333.${NC}"
 fi
 
 echo -e "\n${BOLD}[3/7] Setting up local Ollama models...${NC}"
 if ! command -v ollama >/dev/null 2>&1; then
-  echo -e "${BLUE}Installing Ollama...${NC}"
-  curl -fsSL https://ollama.com/install.sh | sh
-  echo -e "${GREEN}✓ Ollama installed.${NC}"
+  echo "Ollama is missing. Install it using the official instructions, review the installer, then rerun this script." >&2
+  exit 1
 fi
 
 # Ensure Ollama service is active

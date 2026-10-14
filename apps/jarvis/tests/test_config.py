@@ -1,6 +1,9 @@
 """config.load_config testleri — gerçek dosyalarla (tmp_path), sır/yola özel mock yok."""
 from __future__ import annotations
 
+import os
+import stat
+
 import pytest
 
 from arda.config import ConfigError, load_config, save_local
@@ -86,6 +89,21 @@ class TestLoadConfigValidation:
 
 
 class TestSaveLocal:
+    @pytest.mark.parametrize("existing", [False, True], ids=["create", "overwrite"])
+    def test_local_config_is_private_even_with_permissive_umask(self, tmp_path, existing):
+        local = tmp_path / "config.local.yaml"
+        if existing:
+            _write(local, 'vault:\n  path: "/keep/me"\n')
+            local.chmod(0o644)
+
+        old_umask = os.umask(0)
+        try:
+            save_local({"tts": {"voice": "Alice"}}, local=local)
+        finally:
+            os.umask(old_umask)
+
+        assert stat.S_IMODE(local.stat().st_mode) == 0o600
+
     def test_creates_file_when_absent(self, tmp_path):
         local = tmp_path / "config.local.yaml"
         save_local({"tts": {"voice": "Alice"}}, local=local)

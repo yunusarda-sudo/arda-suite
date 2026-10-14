@@ -8,6 +8,8 @@ Doğrulama burada yapılır (vault.path zorunlu); hata durumunda ConfigError fı
 """
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -80,7 +82,20 @@ def save_local(updates: dict, *, local: Path = DEFAULT_LOCAL) -> None:
     """
     current = _read_yaml(local) if local.exists() else {}
     merged = _merge(current, updates)
-    tmp = local.with_name(local.name + ".tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(merged, f, allow_unicode=True, sort_keys=False)
-    tmp.replace(local)
+    local.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{local.name}.", suffix=".tmp", dir=local.parent)
+    tmp = Path(tmp_name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            yaml.safe_dump(merged, f, allow_unicode=True, sort_keys=False)
+            f.flush()
+            os.fsync(f.fileno())
+        tmp.replace(local)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        tmp.unlink(missing_ok=True)
+        raise

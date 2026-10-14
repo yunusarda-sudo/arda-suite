@@ -192,6 +192,39 @@ class TestMultiTokenVerifier(unittest.TestCase):
         self.assertIsNone(self.verify("c" * 32))
 
 
+class TestTokenRegistryValidation(unittest.TestCase):
+    """The current memory store has one owner and does not enforce scopes/roles."""
+
+    OWNER = "single-owner"
+
+    def test_accepts_same_owner_credentials_for_rotation(self):
+        # Both credentials may briefly coexist during rotation, but they must
+        # resolve to the same data owner and claim no unenforced scopes.
+        registry = {
+            "a" * 64: {"user_id": self.OWNER, "client_id": "worker", "scopes": []},
+            "b" * 64: {"user_id": self.OWNER, "client_id": "worker", "scopes": []},
+        }
+        self.assertEqual(t.validate_token_registry(registry, owner=self.OWNER), registry)
+
+    def test_rejects_metadata_for_another_owner(self):
+        registry = {
+            "a" * 64: {"user_id": self.OWNER, "scopes": []},
+            "b" * 64: {"user_id": "other-owner", "scopes": []},
+        }
+        with self.assertRaises(ValueError):
+            t.validate_token_registry(registry, owner=self.OWNER)
+
+    def test_rejects_nonempty_scopes_that_are_not_enforced(self):
+        registry = {"a" * 64: {"user_id": self.OWNER, "scopes": ["read"]}}
+        with self.assertRaises(ValueError):
+            t.validate_token_registry(registry, owner=self.OWNER)
+
+    def test_rejects_unsupported_role_claim(self):
+        registry = {"a" * 64: {"user_id": self.OWNER, "scopes": [], "role": "admin"}}
+        with self.assertRaises(ValueError):
+            t.validate_token_registry(registry, owner=self.OWNER)
+
+
 class TestExtraAllowedHosts(unittest.TestCase):
     """$MEM0_MCP_ALLOWED_HOSTS widens the Host header allowlist for a proxied
     worker. It must widen it by exactly what it names and nothing more."""

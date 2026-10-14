@@ -15,6 +15,13 @@ TOKEN_SENTINEL = "test-only-" + "value-" * 8
 
 
 class PiInstallerSafetyTests(unittest.TestCase):
+    def test_installer_avoids_unpinned_images_and_remote_shell_pipes(self):
+        script = (SERVICE_ROOT / "scripts" / "install-pi.sh").read_text(encoding="utf-8")
+        self.assertIn("qdrant/qdrant:v1.19.2", script)
+        self.assertNotIn("qdrant/qdrant:latest", script)
+        self.assertNotRegex(script, r"curl[^\n]*\|\s*(sudo\s+)?sh")
+        self.assertNotIn("get.docker.com", script)
+
     def test_fresh_install_is_loopback_only_and_does_not_print_token(self):
         with tempfile.TemporaryDirectory(prefix="memory-install-test-") as tmp:
             root = Path(tmp)

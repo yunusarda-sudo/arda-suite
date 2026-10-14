@@ -153,6 +153,10 @@ def _rules_command(args) -> int:
 def _tokens_command(args) -> int:
     if args.tokens_cmd == "add":
         scopes = [s.strip() for s in (args.scopes or "").split(",") if s.strip()]
+        owner = os.environ.get("MEM0_OWNER", "default")
+        if args.user != owner or args.role != "developer" or scopes:
+            print("HTTP tokens must use MEM0_OWNER, the developer role, and no scopes; roles and scopes are not enforced.", file=sys.stderr)
+            return 1
         tok, meta = tokens_store.generate_token(
             user_id=args.user, role=args.role, scopes=scopes, client_id=args.client
         )
@@ -457,13 +461,13 @@ def main() -> int:
     rc.add_argument("path", help="relative file path, e.g. src/services/user.ts")
     rc.add_argument("--scope", default=rules_store.SHARED)
 
-    tk = sub.add_parser("tokens", help="multi-tenant token access management (no Ollama/Qdrant needed)")
+    tk = sub.add_parser("tokens", help="same-owner HTTP credential rotation (no Ollama/Qdrant needed)")
     tsub = tk.add_subparsers(dest="tokens_cmd", required=True)
 
-    ta = tsub.add_parser("add", help="create a new token for user/tenant")
-    ta.add_argument("user", help="user or tenant ID")
-    ta.add_argument("--role", default="developer", choices=["developer", "admin", "viewer"])
-    ta.add_argument("--scopes", default="", help="comma-separated permitted scopes (empty = all)")
+    ta = tsub.add_parser("add", help="create a same-owner HTTP token")
+    ta.add_argument("user", help="must match MEM0_OWNER (default: default)")
+    ta.add_argument("--role", default="developer", choices=["developer"])
+    ta.add_argument("--scopes", default="", help="unsupported: scopes are not enforced")
     ta.add_argument("--client", default="mcp-client", help="client identifier")
 
     tl = tsub.add_parser("list", help="list active tokens")

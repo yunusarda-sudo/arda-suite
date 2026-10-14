@@ -1,8 +1,14 @@
 # ARDA Suite
 
-**Local-first assistant infrastructure, bounded agent execution, and optional shared memory.**
+**A Raspberry Pi 5-focused, local-first assistant stack with bounded agent execution and optional shared memory.**
 
-ARDA Suite brings three related but independently deployable components into one source repository: **Jarvis**, a desktop and Linux assistant; **ARDA Core/Hermes**, experimental task and runtime infrastructure; and **Shared Memory**, an optional memory service. Each component keeps its own Python environment and deployment lifecycle.
+ARDA Suite brings three related but independently deployable components into one source repository: **Jarvis**, a macOS desktop assistant with a separate Linux daemon path; **ARDA Core/Hermes**, experimental task and runtime infrastructure; and **Shared Memory**, an optional memory service. Raspberry Pi 5 is the primary target for the self-hosted Linux deployment, while each component keeps its own Python environment and deployment lifecycle.
+
+## Raspberry Pi 5 deployment focus
+
+The stack is being adapted for a self-hosted Raspberry Pi 5 deployment. The Shared Memory setup is tailored for Pi/Linux hosts with local Ollama models, an ARM64 Qdrant container, loopback-only service bindings, and systemd-managed services. These choices keep the default memory path on the device and avoid requiring hosted model credentials.
+
+Jarvis also has an existing macOS desktop app, and its Linux daemon is installed separately. The Pi-specific services and defaults are in place, but the live Raspberry Pi, hardware performance, and full end-to-end integration have not yet been verified. This is a target-platform and customization focus, not a claim of a validated Pi release.
 
 This is an engineering work in progress, not a production-ready autonomous multi-agent platform.
 

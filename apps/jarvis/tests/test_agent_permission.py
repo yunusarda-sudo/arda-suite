@@ -24,9 +24,14 @@ class TestSensitivePath:
 
 
 class TestClassifyShell:
-    @pytest.mark.parametrize("cmd", ["ls -la", "git status", "git log", "cat README.md", "pytest -q", "grep -r x ."])
-    def test_read_commands_auto(self, cmd):
-        assert classify_shell(cmd) == RiskLevel.AUTO
+    @pytest.mark.parametrize("cmd", [
+        "ls -la", "git status", "git log", "cat README.md", "pytest -q",
+        "grep -r x .", "find . -name '*.py'", "pwd",
+    ])
+    def test_every_non_destructive_shell_command_requires_confirmation(self, cmd):
+        # Shell commands can read outside the workspace (for example `cat ../secret`),
+        # so a command-name allowlist is not a sufficient boundary for AUTO.
+        assert classify_shell(cmd) == RiskLevel.CONFIRM
 
     @pytest.mark.parametrize("cmd", ["git commit -m x", "npm install", "pip install requests", "mkdir foo", "python run.py"])
     def test_mutating_commands_confirm(self, cmd):
@@ -54,8 +59,8 @@ class TestClassifyShell:
         # AUTO listesindeki komut bile tehlikeli alt-kalıp içeriyorsa onay ister (DENY değil)
         assert classify_shell(cmd) == RiskLevel.CONFIRM
 
-    def test_plain_find_still_auto(self):
-        assert classify_shell("find . -name foo.py") == RiskLevel.AUTO
+    def test_plain_find_requires_confirmation_without_os_sandbox(self):
+        assert classify_shell("find . -name foo.py") == RiskLevel.CONFIRM
 
     def test_find_exec_rm_rf_still_deny(self):
         # rm -rf hard-deny'a takılır (escalation'dan önce)
@@ -95,7 +100,7 @@ class TestDecide:
         assert decide("run_tests", {}) == RiskLevel.AUTO
 
     def test_safe_shell_uses_classify(self):
-        assert decide("safe_shell", {"command": "ls"}) == RiskLevel.AUTO
+        assert decide("safe_shell", {"command": "ls"}) == RiskLevel.CONFIRM
         assert decide("safe_shell", {"command": "rm -rf /"}) == RiskLevel.DENY
         assert decide("safe_shell", {"command": "git commit -m x"}) == RiskLevel.CONFIRM
 

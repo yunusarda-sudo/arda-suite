@@ -198,7 +198,7 @@ class AgentRunResult: status: str; spoken: str; logs: tuple[StepLog,...]=()
 - `resolve_in_workspace()` → `../` kaçışını engeller (`PathEscape`); tüm dosya işlemleri workspace kökünde.
 - `is_hard_denied()` → `rm -rf`, `sudo`, `dd`, fork bomb, ham disk yazımı, `chmod 777`, `curl|sh`, `git push --force`, mail gönderimi → koşulsuz DENY.
 - `sensitive_path()` → `.ssh`, `id_rsa`, `.env`, `.aws/credentials`, `.pem`, keychain, `.gnupg`, secrets → DENY.
-- `permission.decide`: `safe_shell` için `classify_shell` (git read-only=AUTO, mutate=CONFIRM, bilinmeyen=CONFIRM); `run_applescript` daima CONFIRM; argüman listesi modu (`shell=False`) → komut enjeksiyonu yok.
+- `permission.decide`: `safe_shell` için yıkıcı komutlar DENY, diğer tüm komutlar CONFIRM alır; runner OS sandbox değildir; `run_applescript` daima CONFIRM; argüman listesi modu (`shell=False`) → komut enjeksiyonu yok.
 - Tüm handler'lar hata durumunda `ToolResult(ok=False, error=…)` döndürür, asla raise etmez.
 
 ### Doğrulayıcı (`agent_verifier.py`)

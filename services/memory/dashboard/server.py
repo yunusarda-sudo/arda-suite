@@ -12,6 +12,7 @@ Serves a self-contained (offline) dashboard on http://localhost:8899
 
 import os
 import json
+import ipaddress
 import re
 import sys
 import time
@@ -25,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
+from urllib.parse import urlsplit
 
 # --- Local imports (assets + mem0 config) -----------------------------------
 HERE = Path(__file__).resolve().parent
@@ -40,6 +42,68 @@ import runner  # noqa: E402  — background agent runs
 # --- Configuration ----------------------------------------------------------
 PORT = int(os.environ.get("MEM0_DASHBOARD_PORT", 8899))
 HOST = os.environ.get("MEM0_DASHBOARD_HOST", "127.0.0.1")
+MAX_REQUEST_BODY_BYTES = 1_048_576
+
+
+def validate_dashboard_host(host):
+    if host == "localhost":
+        return None
+    try:
+        if ipaddress.ip_address(host).is_loopback:
+            return None
+    except ValueError:
+        pass
+    raise ValueError("Dashboard must bind to a loopback address")
+
+
+def _local_host_port(host_value):
+    try:
+        parsed = urlsplit("//" + host_value)
+        host = parsed.hostname
+        port = parsed.port
+        if parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment:
+            return None
+        if host == "localhost" or (host and ipaddress.ip_address(host).is_loopback):
+            return host, port
+    except (ValueError, TypeError):
+        return None
+    return None
+
+
+def is_local_host_header(value, expected_port):
+    result = _local_host_port(value or "")
+    return bool(result and result[1] == expected_port)
+
+
+def is_allowed_origin(value, expected_port):
+    try:
+        parsed = urlsplit(value or "")
+        if parsed.scheme != "http" or parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+            return False
+        result = _local_host_port(parsed.netloc)
+        return bool(result and result[1] == expected_port)
+    except ValueError:
+        return False
+
+
+class RequestBodyTooLarge(ValueError):
+    pass
+
+
+def parse_content_length(headers, max_bytes=MAX_REQUEST_BODY_BYTES):
+    values = headers.get_all("Content-Length", []) if hasattr(headers, "get_all") else None
+    if values is None:
+        raw = headers.get("Content-Length")
+        values = [] if raw is None else [raw]
+    if len(values) != 1 or headers.get("Transfer-Encoding") is not None:
+        raise ValueError("Invalid request framing")
+    raw = values[0]
+    if not raw or not raw.isascii() or not raw.isdecimal():
+        raise ValueError("Invalid Content-Length")
+    length = int(raw)
+    if length > max_bytes:
+        raise RequestBodyTooLarge("Request body exceeds the size limit")
+    return length
 USER_ID = os.environ.get("MEM0_OWNER", "default")
 SHARED_SCOPE = "personal"  # the global "shared brain" tier
 
@@ -1629,6 +1693,20 @@ def list_architectures_with_runner(repo, status, q):
 class Handler(BaseHTTPRequestHandler):
     server_version = "SharedBrain/1.0"
 
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(8)
+
+    def _request_is_local(self, check_origin=False):
+        port = self.server.server_port
+        if not is_local_host_header(self.headers.get("Host", ""), port):
+            self._send_json({"error": "local dashboard requests only"}, status=421)
+            return False
+        origin = self.headers.get("Origin")
+        if check_origin and origin is not None and not is_allowed_origin(origin, port):
+            self._send_json({"error": "cross-origin request rejected"}, status=403)
+            return False
+        return True
     def log_message(self, fmt, *args):  # quieter logs
         sys.stderr.write("[%s] %s\n" % (self.address_string(), fmt % args))
 
@@ -1667,17 +1745,33 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"error": str(exc), "type": type(exc).__name__}, status=status)
 
     def _read_body(self):
-        length = int(self.headers.get("Content-Length", 0) or 0)
+        try:
+            length = parse_content_length(self.headers)
+        except RequestBodyTooLarge as exc:
+            self._send_json({"error": str(exc)}, status=413)
+            return None
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return None
         if not length:
             return {}
         raw = self.rfile.read(length)
+        if len(raw) != length:
+            self._send_json({"error": "truncated request body"}, status=400)
+            return None
         try:
-            return json.loads(raw.decode("utf-8"))
+            body = json.loads(raw.decode("utf-8"))
+            if not isinstance(body, dict):
+                raise ValueError("JSON body must be an object")
+            return body
         except Exception:
-            return {}
+            self._send_json({"error": "invalid JSON body"}, status=400)
+            return None
 
     # -- routing --
     def do_GET(self):
+        if not self._request_is_local():
+            return
         parsed = urlparse(self.path)
         path = parsed.path
         q = parse_qs(parsed.query)
@@ -1773,10 +1867,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(e)
 
     def do_POST(self):
+        if not self._request_is_local(check_origin=True):
+            return
         parsed = urlparse(self.path)
         try:
             if parsed.path == "/api/memory":
                 body = self._read_body()
+                if body is None:
+                    return
                 text = (body.get("text") or "").strip()
                 if not text:
                     return self._send_json({"error": "text is required"}, status=400)
@@ -1785,6 +1883,8 @@ class Handler(BaseHTTPRequestHandler):
                 )
             if parsed.path == "/api/memory/supersede":
                 body = self._read_body()
+                if body is None:
+                    return
                 old_id = (body.get("id") or body.get("old_id") or "").strip()
                 if not old_id:
                     return self._send_json({"error": "id is required"}, status=400)
@@ -1794,6 +1894,8 @@ class Handler(BaseHTTPRequestHandler):
                 )
             if parsed.path == "/api/assistant/chat":
                 body = self._read_body()
+                if body is None:
+                    return
                 q = (body.get("question") or body.get("message") or "").strip()
                 if not q:
                     return self._send_json({"error": "question/message is required"}, status=400)
@@ -1809,6 +1911,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(res)
             if parsed.path == "/api/assistant/remember":
                 body = self._read_body()
+                if body is None:
+                    return
                 text = (body.get("text") or body.get("memory") or "").strip()
                 if not text:
                     return self._send_json({"error": "text is required"}, status=400)
@@ -1825,60 +1929,88 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send_json({"error": str(ex)}, status=500)
             if parsed.path == "/api/content":
                 body = self._read_body()
+                if body is None:
+                    return
                 return self._send_json(write_content(body.get("path"), body.get("content")))
             if parsed.path == "/api/create":
                 body = self._read_body()
+                if body is None:
+                    return
                 return self._send_json(create_item(
                     body.get("kind"), body.get("name"),
                     body.get("folder"), body.get("content"),
                 ))
             if parsed.path == "/api/mcp":
                 body = self._read_body()
+                if body is None:
+                    return
                 return self._send_json(add_mcp_server(
                     body.get("name"), body.get("command"),
                     body.get("args"), body.get("env"),
                 ))
             if parsed.path == "/api/architecture":
                 body = self._read_body()
+                if body is None:
+                    return
                 return self._send_json(architectures.create_architecture(
                     body.get("title"), body.get("repo"), body.get("summary") or "",
                     resolve_repo=_resolve_repo,
                     template_id=body.get("template_id") or architectures.DEFAULT_TEMPLATE_ID,
                 ), status=201)
             if parsed.path == "/api/architecture/template":
+                body = self._read_body()
+                if body is None:
+                    return
                 return self._send_json(
-                    architectures.create_template(self._read_body()), status=201)
+                    architectures.create_template(body), status=201)
             if parsed.path == "/api/architecture/run":
                 body = self._read_body()
+                if body is None:
+                    return
                 return self._send_json(
                     runner.start_run(body.get("id"), api_base=f"http://{HOST}:{PORT}"),
                     status=202)
             if parsed.path == "/api/architecture/run/kill":
-                return self._send_json(runner.kill_run(self._read_body().get("id")))
+                body = self._read_body()
+                if body is None:
+                    return
+                return self._send_json(runner.kill_run(body.get("id")))
             if parsed.path == "/api/architecture/pause-auto":
+                body = self._read_body()
+                if body is None:
+                    return
                 return self._send_json(architectures.set_auto_advance(
-                    self._read_body().get("id"), False))
+                    body.get("id"), False))
             if parsed.path == "/api/architecture/resume-auto":
+                body = self._read_body()
+                if body is None:
+                    return
                 return self._send_json(architectures.set_auto_advance(
-                    self._read_body().get("id"), True))
+                    body.get("id"), True))
             if parsed.path == "/api/architecture/chain":
                 body = self._read_body()
+                if body is None:
+                    return
                 return self._send_json(architectures.set_auto_chain(
                     body.get("id"), bool(body.get("on"))))
             if parsed.path == "/api/architecture/task":
                 body = self._read_body()
+                if body is None:
+                    return
                 return self._send_json(architectures.add_task(
                     body.get("arch"), body.get("phase"), body.get("title"),
                     priority=body.get("priority", architectures.TASK_PRIORITY_DEFAULT),
                 ), status=201)
             if parsed.path == "/api/harness/run":
                 body = self._read_body()
+                if body is None:
+                    return
                 task = (body.get("task") or "").strip()
                 if not task:
                     return self._send_json({"error": "task is required"}, status=400)
                 scope = body.get("scope") or SHARED_SCOPE
-                verify = body.get("verify_command") or body.get("verify")
-                res = run_harness_execution(task, scope=scope, verify_command=verify, cwd=body.get("cwd"))
+                # Never run a caller-supplied shell command from the unauthenticated dashboard.
+                res = run_harness_execution(task, scope=scope)
                 # Return 200 even on safety block, with status="blocked" in JSON payload for UI interceptor
                 return self._send_json(res, status=200)
             return self._send_json({"error": "not found"}, status=404)
@@ -1896,6 +2028,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(e)
 
     def do_DELETE(self):
+        if not self._request_is_local(check_origin=True):
+            return
         parsed = urlparse(self.path)
         q = parse_qs(parsed.query)
         try:
@@ -1930,17 +2064,25 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(e)
 
     def do_PATCH(self):
+        if not self._request_is_local(check_origin=True):
+            return
         parsed = urlparse(self.path)
         try:
             if parsed.path == "/api/memory":
                 body = self._read_body()
+                if body is None:
+                    return
                 return self._send_json(update_memory(body.get("id"), body.get("text"), status=body.get("status")))
             if parsed.path == "/api/architecture":
                 body = self._read_body()
+                if body is None:
+                    return
                 return self._send_json(architectures.update_architecture(
                     body.get("id"), **_patch_fields(body, ARCH_PATCH_FIELDS)))
             if parsed.path == "/api/architecture/task":
                 body = self._read_body()
+                if body is None:
+                    return
                 return self._send_json(architectures.update_task(
                     body.get("arch"), body.get("id"),
                     **_patch_fields(body, TASK_PATCH_FIELDS)))
@@ -1955,12 +2097,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(e)
 
     def do_PUT(self):
+        if not self._request_is_local(check_origin=True):
+            return
         parsed = urlparse(self.path)
         try:
             # One atomic multi-phase move. The phase modal shifts more than one
             # phase at a time, and N sequential PATCHes would race.
             if parsed.path == "/api/architecture/workflow":
                 body = self._read_body()
+                if body is None:
+                    return
                 return self._send_json(architectures.bulk_update_workflow(
                     body.get("id"), body.get("phases")))
             return self._send_json({"error": "not found", "path": parsed.path}, status=404)
@@ -1975,6 +2121,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    validate_dashboard_host(HOST)
     # A run's supervisor thread dies with the process that owned it, so anything
     # still marked running belongs to a previous life of this server.
     try:

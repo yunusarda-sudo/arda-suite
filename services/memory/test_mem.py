@@ -142,12 +142,19 @@ class TestMemCLI(unittest.TestCase):
         )
 
     @patch("tokens.generate_token")
-    @patch("sys.argv", ["mem.py", "tokens", "add", "alice", "--role", "admin"])
+    @patch("sys.argv", ["mem.py", "tokens", "add", "default"])
     def test_tokens_add_command(self, mock_gen):
-        mock_gen.return_value = ("tok12345678901234567890123456789012", {"user_id": "alice", "role": "admin"})
+        mock_gen.return_value = ("tok12345678901234567890123456789012", {"user_id": "default", "role": "developer"})
         ret = mem.main()
         self.assertEqual(ret, 0)
         mock_gen.assert_called_once()
+
+    @patch("tokens.generate_token")
+    @patch("sys.argv", ["mem.py", "tokens", "add", "another-owner"])
+    def test_tokens_add_rejects_a_different_owner(self, mock_gen):
+        ret = mem.main()
+        self.assertEqual(ret, 1)
+        mock_gen.assert_not_called()
 
     @patch("graph_store.get_neighbors")
     @patch("sys.argv", ["mem.py", "graph", "neighbors", "mem:123"])

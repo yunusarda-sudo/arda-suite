@@ -19,6 +19,11 @@ and the MCP, dashboard, and maintenance systemd units. It creates
 credentials, if required by your chosen model provider, belong only in the
 ignored `~/.mem0/config.env` file.
 
+Docker must be available from the configured signed apt repositories. The
+installer pins Qdrant to `qdrant/qdrant:v1.19.2`; install Ollama separately
+using its official instructions and review its installer before running it.
+The setup script does not pipe remote installer scripts into a shell.
+
 ## Verify
 
 ```bash

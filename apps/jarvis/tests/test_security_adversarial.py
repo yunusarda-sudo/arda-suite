@@ -74,8 +74,8 @@ class TestShellNeverSilentlyAuto:
         assert decide("safe_shell", {"command": cmd}) != RiskLevel.AUTO, f"AUTO olmamalı: {cmd!r}"
 
     @pytest.mark.parametrize("cmd", ["ls -la", "git status", "git log --oneline", "cat x.txt"])
-    def test_safe_reads_stay_auto(self, cmd):
-        assert decide("safe_shell", {"command": cmd}) == RiskLevel.AUTO
+    def test_shell_reads_require_approval_without_os_sandbox(self, cmd):
+        assert decide("safe_shell", {"command": cmd}) == RiskLevel.CONFIRM
 
 
 class TestSensitivePathEvasions:

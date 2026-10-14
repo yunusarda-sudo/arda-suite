@@ -1,13 +1,12 @@
 """İzin katmanı — bir (araç, params) çağrısını auto | confirm | deny olarak sınıflar.
 
-Politika tek yerde (executor bu kararla kapı tutar):
-- auto: salt-okuma/listeleme/arama/test → onaysız.
-- confirm: yazma/kurulum/commit/dış-veri → kullanıcı onayı (native dialog).
-- deny: sır/credential okuma, destructive delete, sudo, izinsiz mail → asla çalışmaz.
+Policy is enforced centrally by the executor:
+- auto: workspace-scoped tools explicitly registered as safe.
+- confirm: writes, external data, and every shell command.
+- deny: secrets and destructive patterns.
 
-Temel risk araç kayıt defterinden (agent_tools.REGISTRY) gelir; sır-yolu ve shell komutu
-gibi DİNAMİK durumlar burada yükseltilir/düşürülür. Yıkıcı shell kalıpları için
-agent_tools.is_hard_denied tek kaynak olarak kullanılır (savunma derinliği orada da var).
+Dynamic secret-path and shell checks supplement the tool registry. Destructive
+shell patterns use agent_tools.is_hard_denied as the shared policy source.
 """
 from __future__ import annotations
 
@@ -19,59 +18,30 @@ from arda.agent_models import RiskLevel
 # döngüsel import olmaz. Buradan yeniden ihraç: `from arda.agent_permission import sensitive_path` korunur.
 from arda.agent_tools import REGISTRY, is_hard_denied, sensitive_path
 
-# İlk token'a göre shell komutu sınıfı. Liste dışı her ikili → muhafazakâr CONFIRM.
-_SHELL_ALLOW = {
-    "ls", "cat", "pwd", "echo", "grep", "egrep", "fgrep", "rg", "find", "head", "tail",
-    "wc", "which", "type", "date", "du", "df", "tree", "stat", "diff", "file", "sort",
-    "uniq", "cut", "awk", "pytest", "true", "basename", "dirname", "realpath",
-}
-_SHELL_MUTATE = {
-    "mkdir", "touch", "cp", "mv", "rm", "ln", "tee", "sed", "chmod", "chown",
-    "npm", "pnpm", "yarn", "pip", "pip3", "brew", "make", "python", "python3",
-    "node", "deno", "bun", "cargo", "go", "install",
-}
-# git alt-komutuna göre okuma vs yazma. "config" YOK: git config yazabilir
-# (git config user.email …) → okuma sanılıp onaysız çalışmasın, CONFIRM'a düşsün.
-_GIT_READ = {"status", "log", "diff", "show", "branch", "remote", "ls-files", "blame", "describe"}
-
-# AUTO listesindeki güvenli komutlar bile bu tehlikeli alt-kalıpları içeriyorsa CONFIRM'a
-# YÜKSELT (DENY değil — kullanıcı native dialog'la onaylayabilir): find -exec/-delete
-# (her eşleşmede komut çalıştırır/siler, ilk-token sınıflamasını atlar), awk/perl system()
-# (kabuk sandbox'ına kaçış). Gerçekten yıkıcı biçimler (rm -rf, sudo…) zaten hard-deny.
-_AUTO_ESCALATE_RE = re.compile(r"-exec|-delete|\bsystem\s*\(", re.IGNORECASE)
-
 # AppleScript `do shell script "<cmd>"` — gömülü kabuk komutunu yakala (kaçışlı tırnak dahil).
 # Bu payload `classify_shell`'e verilir → sır-yolu/yıkıcı kalıplar AppleScript üzerinden de yakalanır.
 _DO_SHELL_RE = re.compile(r'do\s+shell\s+script\s+"((?:[^"\\]|\\.)*)"', re.IGNORECASE)
 
 
 def classify_shell(command: str) -> RiskLevel:
-    """Bir shell komutunu auto | confirm | deny olarak sınıfla (ilk token + içerik)."""
+    """Hard-deny destructive commands; require confirmation for every other shell call.
+
+    The process runner does not provide an OS sandbox. Even apparently read-only
+    commands can read outside the workspace or execute code through flags/plugins.
+    """
     command = command or ""
     if is_hard_denied(command):
         return RiskLevel.DENY
     try:
         tokens = shlex.split(command)
     except ValueError:
-        return RiskLevel.CONFIRM           # tırnak/sözdizimi bozuk → güvenli tarafta kal
+        return RiskLevel.CONFIRM
     if not tokens:
         return RiskLevel.CONFIRM
     # Komut bir sır-yoluna dokunuyorsa (cat ~/.ssh/id_rsa) → reddet.
     if any(sensitive_path(t) for t in tokens[1:]):
         return RiskLevel.DENY
-    base = tokens[0].rsplit("/", 1)[-1]    # /usr/bin/ls → ls
-    if base == "git":
-        sub = tokens[1] if len(tokens) > 1 else ""
-        return RiskLevel.AUTO if sub in _GIT_READ else RiskLevel.CONFIRM
-    if base in _SHELL_ALLOW:
-        # Güvenli komut bile tehlikeli alt-kalıp içeriyorsa (find -exec/-delete, system()) →
-        # otomatik çalıştırma, onay iste.
-        if _AUTO_ESCALATE_RE.search(command):
-            return RiskLevel.CONFIRM
-        return RiskLevel.AUTO
-    if base in _SHELL_MUTATE:
-        return RiskLevel.CONFIRM
-    return RiskLevel.CONFIRM                # bilinmeyen ikili → onay iste
+    return RiskLevel.CONFIRM
 
 
 def decide(tool: str, params: dict | None) -> RiskLevel:
