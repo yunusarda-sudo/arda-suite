@@ -186,16 +186,18 @@ class ExecutionBridge:
                 payload={"job_id": job.id, "worker_id": self.worker_id, "attempt": job.attempt_count},
             )
             heartbeat_stop = threading.Event()
+            lease_lost = threading.Event()
             heartbeat_thread = threading.Thread(
                 target=self._heartbeat_until_done,
-                args=(job.id, token, heartbeat_stop),
+                args=(job.id, token, heartbeat_stop, lease_lost),
                 daemon=True,
             )
             heartbeat_thread.start()
             try:
                 if self.executor is None:
                     raise RuntimeError("no task executor configured")
-                result = self.executor.execute(task)
+                cancellable = getattr(self.executor, "execute_cancellable", None)
+                result = cancellable(task, lease_lost) if callable(cancellable) else self.executor.execute(task)
             except Exception as exc:  # noqa: BLE001 - boundary must persist failure
                 heartbeat_stop.set()
                 error = f"executor failure: {type(exc).__name__}"
@@ -268,12 +270,14 @@ class ExecutionBridge:
                 "status": job.status,
                 "leased_by": job.leased_by, "attempt_count": job.attempt_count}
 
-    def _heartbeat_until_done(self, job_id: str, lease_token: str, stop: threading.Event) -> None:
+    def _heartbeat_until_done(self, job_id: str, lease_token: str, stop: threading.Event,
+                              lease_lost: threading.Event) -> None:
         interval = max(1.0, self.lease_seconds / 3)
         while not stop.wait(interval):
             try:
                 self.heartbeat(job_id, lease_token)
             except Exception:
+                lease_lost.set()
                 return
 
     @staticmethod

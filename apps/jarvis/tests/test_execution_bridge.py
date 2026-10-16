@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 import subprocess
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 from arda.autonomous_work_loop import WorkResult, WorkTask
@@ -163,6 +166,53 @@ def test_stale_executor_failure_cannot_block_task_or_fail_new_lease(tmp_path):
     finally:
         db.close()
     assert subprocess.check_output(["git", "rev-parse", "refs/heads/accepted"], cwd=repo, text=True).strip() == baseline
+
+
+def test_heartbeat_failure_signals_cancellable_executor(tmp_path):
+    db_path = tmp_path / "core.sqlite3"
+    repo, baseline, _candidate = make_repo(tmp_path)
+    setup_db(db_path)
+
+    class WaitingExecutor:
+        def __init__(self):
+            self.cancelled = threading.Event()
+
+        def execute_cancellable(self, task, cancel_event):
+            assert task.task_id == "TASK-001"
+            assert cancel_event.wait(4)
+            self.cancelled.set()
+            return ExecutionResult(result=WorkResult.INVALID.value, reason="Core lease was lost")
+
+    executor = WaitingExecutor()
+    bridge = ExecutionBridge(db_path, executor, worker_id="worker-1", lease_seconds=3)
+    bridge.enqueue(make_task(repo, baseline), project_id="sample-project")
+
+    def lose_lease(_job_id, _token):
+        raise RuntimeError("stale lease")
+
+    bridge.heartbeat = lose_lease
+    outcome = bridge.run_once()
+
+    assert executor.cancelled.is_set()
+    assert outcome.result == WorkResult.INVALID.value
+
+
+def test_run_bounded_terminates_process_group_when_cancelled(tmp_path):
+    from arda.hermes_sandbox import HermesPodmanTaskExecutor
+
+    cancelled = threading.Event()
+    timer = threading.Timer(0.3, cancelled.set)
+    timer.start()
+    started = time.monotonic()
+    result = HermesPodmanTaskExecutor._run_bounded(
+        ["/bin/sh", "-c", "sleep 10"], cwd=tmp_path, env=os.environ,
+        timeout_seconds=5, stdout_limit=1024, stderr_limit=1024, cancel_event=cancelled,
+    )
+    timer.join()
+
+    assert result["termination_reason"] == "Core lease lost"
+    assert time.monotonic() - started < 3
+    assert result["exit_code"] is not None
 
 
 def test_lifecycle_projection_failure_does_not_undo_durable_acceptance(tmp_path, monkeypatch):

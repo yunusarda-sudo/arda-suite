@@ -18,6 +18,7 @@ import posixpath
 import subprocess
 import tempfile
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -223,7 +224,12 @@ class HermesPodmanTaskExecutor:
         self.disk_limit_bytes = disk_limit_bytes
 
     def execute(self, task: WorkTask) -> ExecutionResult:
+        return self.execute_cancellable(task, threading.Event())
+
+    def execute_cancellable(self, task: WorkTask, cancel_event: threading.Event) -> ExecutionResult:
         task.validate()
+        if cancel_event.is_set():
+            return ExecutionResult(WorkResult.INVALID.value, "Core lease was lost", evidence={})
         if not task.allowed_paths:
             return ExecutionResult(WorkResult.INVALID.value, "task has no allowed_paths", evidence={})
         commands = self.evaluator_commands.get(task.task_type)
@@ -255,10 +261,15 @@ class HermesPodmanTaskExecutor:
             shutil.copytree(source, work, dirs_exist_ok=True, symlinks=True)
             self._init_disposable_git(work, task)
             audit_path = root / "sandbox-audit.jsonl"
-            hermes = self._run_hermes(task, root, source, work, audit_path)
+            hermes = self._run_hermes(task, root, source, work, audit_path, cancel_event)
             audit = self._read_audit(audit_path)
+            if cancel_event.is_set():
+                return ExecutionResult(WorkResult.INVALID.value, "Core lease was lost",
+                                       evidence={"hermes": hermes, "sandbox_audit": audit})
             if hermes["error"]:
                 return ExecutionResult(WorkResult.FAIL.value, hermes["error"], evidence={"hermes": hermes, "sandbox_audit": audit})
+            if cancel_event.is_set():
+                return ExecutionResult(WorkResult.INVALID.value, "Core lease was lost", evidence={"hermes": hermes})
             if not audit or not any(record.get("outcome") == "succeeded" for record in audit):
                 return ExecutionResult(WorkResult.INVALID.value, "Hermes completed without invoking the sandbox tool",
                                       evidence={"hermes": hermes, "sandbox_audit": audit})
@@ -273,16 +284,23 @@ class HermesPodmanTaskExecutor:
             before_evaluation = self._workspace_digest(work)
             evaluation = self._evaluate(task, source, work, commands,
                                         remaining_seconds=task.hard_timeout_seconds - (time.monotonic() - started))
+            if cancel_event.is_set():
+                return ExecutionResult(WorkResult.INVALID.value, "Core lease was lost", evidence={"hermes": hermes})
             if before_evaluation != self._workspace_digest(work):
                 return ExecutionResult(WorkResult.INVALID.value, "independent evaluator modified the candidate workspace",
                                        evidence={"hermes": hermes, "sandbox_audit": audit,
                                                  "changed_paths": changed, "evaluation": evaluation})
+            if cancel_event.is_set():
+                return ExecutionResult(WorkResult.INVALID.value, "Core lease was lost", evidence={"hermes": hermes})
             if not evaluation["passed"]:
                 return ExecutionResult(WorkResult.FAIL.value, "independent evaluator failed",
                                        evidence={"hermes": hermes, "sandbox_audit": audit,
                                                  "changed_paths": changed, "evaluation": evaluation})
             # Only trusted code writes candidate Git objects; no worker ref is imported.
             candidate = self._candidate_commit(repo, task, work)
+            if cancel_event.is_set():
+                return ExecutionResult(WorkResult.INVALID.value, "Core lease was lost",
+                                       evidence={"candidate_sha": candidate})
             return ExecutionResult(WorkResult.PASS.value, "sandboxed Hermes and independent evaluation passed",
                                    candidate_sha=candidate,
                                    evidence={"task_id": task.task_id, "contract_hash": task.contract_hash,
@@ -294,7 +312,9 @@ class HermesPodmanTaskExecutor:
         finally:
             shutil.rmtree(root)
 
-    def _run_hermes(self, task: WorkTask, root: Path, source: Path, work: Path, audit_path: Path) -> dict[str, Any]:
+    def _run_hermes(self, task: WorkTask, root: Path, source: Path, work: Path, audit_path: Path,
+                    cancel_event: threading.Event | None = None) -> dict[str, Any]:
+        cancel_event = cancel_event or threading.Event()
         hermes_home = root / "hermes-home"
         hermes_home.mkdir(mode=0o700)
         query_file = root / "task.txt"
@@ -328,7 +348,8 @@ class HermesPodmanTaskExecutor:
                 "--max-turns", str(task.max_turns), "--source", "arda-worker"]
         completed = self._run_bounded(argv, cwd=work, env=env,
                                       timeout_seconds=task.hard_timeout_seconds,
-                                      stdout_limit=2 * 1024 * 1024, stderr_limit=64 * 1024)
+                                      stdout_limit=2 * 1024 * 1024, stderr_limit=64 * 1024,
+                                      cancel_event=cancel_event)
         if completed["termination_reason"]:
             return {"error": f"Hermes {completed['termination_reason']}", "exit_code": completed["exit_code"],
                     "tool_calls": 0, "stdout_sha256": completed["stdout_sha256"],
@@ -352,7 +373,8 @@ class HermesPodmanTaskExecutor:
 
     @staticmethod
     def _run_bounded(argv: Sequence[str], *, cwd: Path, env: Mapping[str, str],
-                     timeout_seconds: float, stdout_limit: int, stderr_limit: int) -> dict[str, Any]:
+                     timeout_seconds: float, stdout_limit: int, stderr_limit: int,
+                     cancel_event: threading.Event | None = None) -> dict[str, Any]:
         process = subprocess.Popen(list(argv), cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         limits = {process.stdout: stdout_limit, process.stderr: stderr_limit}
@@ -365,6 +387,9 @@ class HermesPodmanTaskExecutor:
         deadline = time.monotonic() + timeout_seconds
         reason = None
         while selector.get_map():
+            if cancel_event is not None and cancel_event.is_set():
+                reason = "Core lease lost"
+                break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 reason = "hard timeout"
@@ -432,7 +457,9 @@ class HermesPodmanTaskExecutor:
                 resource_limits=ResourceLimits(pids=64, cpu_millis=1000, memory_mb=self.memory_mb, memory_required=True),
                 timeout_seconds=min(remaining, 300), output_limits=OutputLimits())
             try:
-                result = self.runtime.run(request)
+                run_cancellable = getattr(self.runtime, "run_cancellable", None)
+                result = (run_cancellable(request, cancel_event) if callable(run_cancellable)
+                          else self.runtime.run(request))
             except Exception as exc:
                 return {"passed": False, "checks": checks, "error": type(exc).__name__}
             checks.append({"status": result.status, "exit_code": result.exit_code,

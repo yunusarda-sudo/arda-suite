@@ -9,6 +9,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 import re
 import uuid
@@ -285,7 +286,7 @@ class PodmanRuntime:
         args.extend((self.image, *request.argv))
         return args
 
-    def run(self, request: ExecutionRequest) -> ExecutionResult:
+    def run(self, request: ExecutionRequest, *, cancel_event: threading.Event | None = None) -> ExecutionResult:
         request.validate()
         if request.require_rootless and self.capabilities.rootless is not True:
             raise CapabilityMismatchError("rootless Podman could not be confirmed")
@@ -307,7 +308,8 @@ class PodmanRuntime:
                 text=False,
                 start_new_session=True,
             )
-            stdout, stderr, reason = self._collect(process, request, workspace=workspace)
+            stdout, stderr, reason = self._collect(process, request, workspace=workspace,
+                                                   cancel_event=cancel_event)
             artifacts, artifact_error = self._artifacts(workspace, request.expected_artifacts)
             if artifact_error is not None and reason is None:
                 reason = artifact_error
@@ -340,6 +342,9 @@ class PodmanRuntime:
         if not cleanup_ok:
             result = ExecutionResult(**{**result.__dict__, "cleanup_ok": False})
         return result
+
+    def run_cancellable(self, request: ExecutionRequest, cancel_event: threading.Event) -> ExecutionResult:
+        return self.run(request, cancel_event=cancel_event)
 
     def _cleanup_container(self, container_name: str) -> bool:
         """Remove a still-running container after client-side termination.
@@ -394,7 +399,8 @@ class PodmanRuntime:
         }
 
     @staticmethod
-    def _collect(process: Any, request: ExecutionRequest, *, workspace: Path | None = None) -> tuple[str, str, str | None]:
+    def _collect(process: Any, request: ExecutionRequest, *, workspace: Path | None = None,
+                 cancel_event: threading.Event | None = None) -> tuple[str, str, str | None]:
         selector = selectors.DefaultSelector()
         streams = {process.stdout: ("stdout", request.output_limits.stdout_bytes), process.stderr: ("stderr", request.output_limits.stderr_bytes)}
         for stream in streams:
@@ -403,6 +409,21 @@ class PodmanRuntime:
         reason = None
         deadline = time.monotonic() + request.timeout_seconds
         while streams:
+            if cancel_event is not None and cancel_event.is_set():
+                reason = "Core lease lost"
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                streams.clear()
+                break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 reason = "timeout"

@@ -65,6 +65,39 @@ def test_runtime_kills_command_when_aggregate_workspace_limit_is_exceeded(tmp_pa
     assert result.termination_reason == "disk_limit"
 
 
+def test_runtime_cancels_active_container_client_when_lease_is_lost(tmp_path):
+    import threading
+    import time
+
+    source = tmp_path / "source"
+    work = tmp_path / "work"
+    source.mkdir()
+    work.mkdir()
+    cancel_event = threading.Event()
+
+    def process_factory(_argv, **kwargs):
+        return subprocess.Popen(["/bin/sh", "-c", "sleep 10"], **kwargs)
+
+    request = ExecutionRequest(
+        execution_id="lease-cancel",
+        repository_snapshot=source,
+        working_directory=work,
+        argv=("/bin/sh", "-lc", "sleep 10"),
+        timeout_seconds=5,
+    )
+    timer = threading.Timer(0.3, cancel_event.set)
+    timer.start()
+    started = time.monotonic()
+    result = PodmanRuntime(image=IMAGE, process_factory=process_factory).run(
+        request, cancel_event=cancel_event,
+    )
+    timer.join()
+
+    assert result.termination_reason == "Core lease lost"
+    assert time.monotonic() - started < 3
+    assert result.exit_code is not None
+
+
 def test_sandbox_mcp_exposes_only_exec_and_pins_workspace_and_policy(tmp_path):
     source = tmp_path / "source"
     work = tmp_path / "work"
@@ -208,7 +241,7 @@ def test_executor_mocked_hermes_path_builds_baseline_parent_candidate(tmp_path, 
                                          evaluator_commands={"maintenance": [["true"]]},
                                          provider_env_keys=[])
 
-    def fake_hermes(_task, root, _source, work, audit_path):
+    def fake_hermes(_task, root, _source, work, audit_path, _cancel_event=None):
         (work / "file.txt").write_text("candidate\n", encoding="utf-8")
         audit_path.write_text('{"tool":"sandbox_exec","outcome":"succeeded"}\n', encoding="utf-8")
         return {"error": None, "exit_code": 0, "tool_calls": 1}
