@@ -117,7 +117,24 @@ def test_runtime_process_environment_is_not_inherited(tmp_path):
     result = PodmanRuntime(image=IMAGE, process_factory=factory).run(request(tmp_path))
     assert result.status == "succeeded"
     assert "ARDA_SPIKE_SECRET" not in captured
-    assert set(captured) == {"PATH"}
+    assert set(captured) <= {"PATH", "HOME", "XDG_RUNTIME_DIR", "TMPDIR",
+                             "CONTAINERS_CONF", "CONTAINERS_CONF_OVERRIDE"}
+    assert "PATH" in captured
+
+
+def test_custom_workspace_is_used_for_artifact_collection(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+
+    def factory(_argv, **kwargs):
+        (work / "candidate.patch").write_text("diff", encoding="utf-8")
+        return subprocess.Popen([sys.executable, "-c", "pass"], **kwargs)
+
+    req = request(tmp_path, working_directory=work, expected_artifacts=("candidate.patch",))
+    result = PodmanRuntime(image=IMAGE, process_factory=factory).run(req)
+
+    assert result.status == "succeeded"
+    assert result.artifacts["candidate.patch"]
 
 
 def test_timeout_is_failure_and_reports_termination(tmp_path):
