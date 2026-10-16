@@ -14,8 +14,9 @@ enable autonomous discovery, merge to `main`, or deploy to the Raspberry Pi.
 2. **Specify with tests** — stale lease, same-baseline competitors, crash
    boundaries, repeated recovery, CAS conflict, and cleanup/evidence truth.
 3. **Implement** — durable intent in Core SQLite; exact lease/generation and
-   baseline validation; Git `update-ref` expected-old CAS; idempotent
-   reconciliation; candidate-only harness behavior.
+   baseline validation; candidate must be a direct child of the expected
+   baseline; Git `update-ref` expected-old CAS; idempotent reconciliation;
+   candidate-only harness behavior.
 4. **Verify** — focused tests followed by the project suite and diff review.
 5. **Reviewable delivery** — feature branch and PR only; no merge or Pi deploy.
 
@@ -57,6 +58,9 @@ entire machine is protected from a compromised coding agent.
 - Stale/expired lease and stale generation cannot promote or complete.
 - Intent records job/task, generation, old/candidate SHA, evidence digest,
   state, and timestamps.
+- When the accepted ref still matches the expected baseline, Core rejects a
+  candidate whose only parent is not that baseline. If the ref already moved,
+  the intent is recorded as a conflict and cannot be promoted.
 - CAS uses expected old SHA. Recovery accepts the candidate ref idempotently,
   safely resolves an unchanged old ref, and records unexpected refs as
   conflicts without force reset.
@@ -83,6 +87,8 @@ changes; do not reset accepted refs or touch the live Pi.
 ## Verification snapshot
 
 - Focused Core/acceptance/bridge/harness suite: 62 passed.
+- Follow-up focused acceptance, bridge, harness, Core, episode, and organization
+  suite after the direct-parent guard: 63 passed.
 - Python compile check for `arda/*.py`: passed.
 - `git diff --check`: passed.
 - Full repository suite is blocked in this checkout: the project `.venv` is

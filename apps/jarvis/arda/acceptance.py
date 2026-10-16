@@ -83,6 +83,8 @@ class AcceptanceCoordinator:
                 if not same:
                     raise AcceptanceConflict("lease generation already has a different acceptance intent")
                 return existing["intent_id"]
+            if current_ref == expected_old_sha:
+                self._require_candidate_parent(repo, expected_old_sha, candidate_sha)
             if crash_at == "before_intent_commit":
                 raise RuntimeError("simulated crash before acceptance intent commit")
             if self.fault_hook:
@@ -326,3 +328,14 @@ class AcceptanceCoordinator:
         if (len(value) not in (40, 64)
                 or any(char not in "0123456789abcdef" for char in value.lower())):
             raise ValueError(f"{field} must be a hexadecimal SHA-1 or SHA-256")
+
+    @staticmethod
+    def _require_candidate_parent(repo: Path, expected_old_sha: str, candidate_sha: str) -> None:
+        completed = subprocess.run(
+            ["git", "rev-list", "--parents", "-n", "1", candidate_sha],
+            cwd=repo, check=True, capture_output=True, text=True, timeout=30,
+        )
+        commit_and_parents = completed.stdout.split()
+        if (len(commit_and_parents) != 2
+                or commit_and_parents[1].lower() != expected_old_sha.lower()):
+            raise AcceptanceConflict("candidate commit must be a direct child of expected baseline")

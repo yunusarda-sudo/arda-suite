@@ -163,6 +163,26 @@ def test_executor_supplied_accepted_sha_is_rejected(tmp_path):
     assert core.db.execute("SELECT COUNT(*) FROM acceptance_intents").fetchone()[0] == 0
 
 
+def test_candidate_commit_must_be_direct_child_of_expected_baseline(tmp_path):
+    db_path = tmp_path / "core.sqlite3"
+    repo, old, _candidate = make_repo(tmp_path)
+    subprocess.run(["git", "switch", "--orphan", "unrelated"], cwd=repo, check=True,
+                   capture_output=True, text=True)
+    (repo / "unrelated.txt").write_text("not based on accepted baseline\n", encoding="utf-8")
+    subprocess.run(["git", "add", "--all"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "unrelated candidate"], cwd=repo, check=True)
+    unrelated = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    job_id, token, generation, _ = lease(db_path)
+    core = coordinator(db_path)
+
+    with pytest.raises(AcceptanceConflict, match="direct child of expected baseline"):
+        prepare(core, job_id=job_id, token=token, generation=generation,
+                repo=repo, old=old, candidate=unrelated)
+
+    assert subprocess.check_output(["git", "rev-parse", "refs/heads/accepted"], cwd=repo, text=True).strip() == old
+    assert core.db.execute("SELECT COUNT(*) FROM acceptance_intents").fetchone()[0] == 0
+
+
 def test_tampered_immutable_evidence_blocks_promotion(tmp_path):
     db_path = tmp_path / "core.sqlite3"
     repo, old, candidate = make_repo(tmp_path)
@@ -220,6 +240,8 @@ def test_short_branch_name_is_normalized_to_full_heads_ref(tmp_path):
 def test_old_conflicted_intent_cannot_overwrite_newer_accepted_job_state(tmp_path):
     db_path = tmp_path / "core.sqlite3"
     repo, old, candidate_one = make_repo(tmp_path)
+    subprocess.run(["git", "checkout", "--detach", old], cwd=repo, check=True,
+                   capture_output=True, text=True)
     (repo / "third.txt").write_text("candidate two\n", encoding="utf-8")
     subprocess.run(["git", "add", "third.txt"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "candidate two"], cwd=repo, check=True)
@@ -432,6 +454,8 @@ def test_crash_before_git_cas_aborts_intent_and_never_claims_success(tmp_path):
 def test_two_candidates_from_same_baseline_never_force_overwrite(tmp_path):
     db_path = tmp_path / "core.sqlite3"
     repo, old, candidate = make_repo(tmp_path)
+    subprocess.run(["git", "checkout", "--detach", old], cwd=repo, check=True,
+                   capture_output=True, text=True)
     (repo / "other.txt").write_text("second candidate\n", encoding="utf-8")
     subprocess.run(["git", "add", "other.txt"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "other candidate"], cwd=repo, check=True)
@@ -486,6 +510,8 @@ def test_changed_baseline_is_recorded_as_conflict_before_any_promotion(tmp_path)
 def test_concurrent_same_baseline_promotions_have_one_winner(tmp_path):
     db_path = tmp_path / "core.sqlite3"
     repo, old, candidate = make_repo(tmp_path)
+    subprocess.run(["git", "checkout", "--detach", old], cwd=repo, check=True,
+                   capture_output=True, text=True)
     (repo / "other.txt").write_text("second candidate\n", encoding="utf-8")
     subprocess.run(["git", "add", "other.txt"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "other candidate"], cwd=repo, check=True)
