@@ -15,9 +15,9 @@ Model orchestration runs in the trusted Hermes process. Provider credentials are
 - `arda.execution.PodmanRuntime` now supports a separately mounted work directory, requires a confirmed rootless capability when requested, checks memory capability, applies per-file `RLIMIT_FSIZE`, monitors aggregate workspace bytes, passes a minimal Podman client environment, and ignores configurable `containers.conf` defaults that could add mounts.
 - `arda.hermes_sandbox.SandboxMCPServer` implements a newline-delimited JSON-RPC MCP server with a single `sandbox_exec` tool, pinned source/work paths, command/time/call/output/resource bounds, and hash-only command audit records.
 - `HermesPodmanTaskExecutor` implements the bridge executor: it validates the frozen baseline and path/evaluator contract, materializes exact Git blobs without `.git`, creates a disposable local Git repository, launches Hermes with a temporary profile/tool allowlist, requires successful sandbox tool evidence, checks path scope, runs independent commands through the same isolated runtime, rejects evaluator mutation, and creates a trusted candidate commit with the exact baseline parent using an isolated Git index. It never advances an accepted ref.
-- If Core heartbeat renewal fails, the bridge signals lease loss to cancellable executors. Hermes and production Podman evaluator process groups are terminated and reaped; the executor returns INVALID and does not create a candidate. Core's existing lease-fenced artifact/acceptance checks remain authoritative. Injected legacy test executors retain the original `execute(task)` interface.
+- If Core heartbeat renewal fails, the bridge signals lease loss to cancellable executors. The Hermes parent writes a mode-0600 cancellation marker in its private task root before terminating the process group; the MCP child watches that marker and forwards cancellation to `PodmanRuntime.run_cancellable`, so a Podman client in its own session can stop and clean up. The parent allows a bounded 10-second graceful cleanup window, then kills/reaps Hermes. Independent evaluators also receive the lease event through `run_cancellable`. The executor returns INVALID and does not create a candidate. Core's existing lease-fenced artifact/acceptance checks remain authoritative. Injected legacy test executors retain the original `execute(task)` interface.
 - `build_executor()` is compatible with `ARDA_BRIDGE_EXECUTOR_FACTORY=arda.hermes_sandbox:build_executor` and requires digest-pinned `ARDA_SANDBOX_IMAGE`, JSON `ARDA_SANDBOX_EVALUATOR_COMMANDS`, and explicit JSON `ARDA_HERMES_PROVIDER_ENV_KEYS`.
-- Focused tests cover Podman argv and workspace limits, MCP tool allowlisting and bounds, candidate parent/ref invariants, symlink rejection/validation, and mocked Hermes-to-candidate orchestration.
+- Focused tests cover Podman argv and workspace limits, MCP tool allowlisting and bounds, lease cancellation forwarding, candidate parent/ref invariants, symlink rejection/validation, and mocked Hermes-to-candidate orchestration.
 
 ## Trust flow
 
@@ -43,8 +43,8 @@ The Hermes MCP tool configuration uses a single explicit server with an include 
 
 ## Verification snapshot (2026-10-17, continued)
 
-- `PASS` — focused lease/cancellation and Hermes sandbox tests: **17 passed**.
-- `PASS` — `./.venv/bin/python -m pytest -o addopts='' -q`: **1342 passed, 5 skipped in 45.85s**. The ignored project-local `.venv` was built from `requirements-rpi.txt`. The 5 skipped cases are live Ollama tests because this checkout has no ignored `config.local.yaml`/vault configuration.
+- `PASS` — focused lease/cancellation and Hermes sandbox tests after review fixes: **19 passed**.
+- `PASS` — `./.venv/bin/python -m pytest -o addopts='' -q`: **1344 passed, 5 skipped in 43.78s**. The ignored project-local `.venv` was built from `requirements-rpi.txt`. The 5 skipped cases are live Ollama tests because this checkout has no ignored `config.local.yaml`/vault configuration.
 - `PASS` — `python3 -m py_compile arda/execution.py arda/execution_bridge.py arda/hermes_sandbox.py` and `git diff --check`.
 - `FAIL` — system Python `python3 -m pytest -q` cannot collect the suite because project dependencies (including `numpy`, `ollama`, and `yaml`) are absent from system Python. This is an environment mismatch; the project `.venv` full-suite run above passed.
 - `PASS` — previously missing baseline observer/batch scripts are implemented against their existing tests and documentation; migration assertions now match the current 18 migrations, and the memory test expectation now matches the implemented `default` owner without changing the memory namespace.
@@ -52,7 +52,7 @@ The Hermes MCP tool configuration uses a single explicit server with an include 
 - `PASS` — `git diff --check`.
 - `BLOCKED` — live Podman/Hermes test: no `podman` or `hermes` CLI is installed; Docker is installed but its daemon socket is absent. No real container, provider call, or sandbox-negative test ran.
 - `BLOCKED` — physical Pi test: Tailscale CLI fails to start, and the `rpi` SSH alias is configured but not reachable/verified. No Pi command or deployment ran.
-- `NOT_RUN` — full crash/restart acceptance flow with the new executor against live Podman; host-secret/network/accepted-`.git` denial on a real Linux host. Cancellation is covered with local subprocess test doubles; the physical Podman kill-and-cleanup path is still unverified.
+- `NOT_RUN` — full crash/restart acceptance flow with the new executor against live Podman; host-secret/network/accepted-`.git` denial on a real Linux host. Cancellation marker and MCP/runtime propagation are covered with local test doubles; the physical Podman kill-and-cleanup path is still unverified.
 - `NOT_RUN` — merge, deployment, unattended coding, WP-2 implementation.
 
 ## Review checklist before WP-1 can pass

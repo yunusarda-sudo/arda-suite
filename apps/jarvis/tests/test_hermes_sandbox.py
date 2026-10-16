@@ -135,6 +135,35 @@ def test_sandbox_mcp_exposes_only_exec_and_pins_workspace_and_policy(tmp_path):
     assert request.argv == ("/bin/sh", "-lc", "printf ok")
 
 
+def test_sandbox_mcp_forwards_lease_cancellation_to_runtime(tmp_path):
+    import threading
+    import time
+
+    source, work = tmp_path / "source", tmp_path / "work"
+    source.mkdir(); work.mkdir()
+    cancel_event = threading.Event()
+    observed = threading.Event()
+
+    class Runtime:
+        def run_cancellable(self, _request, received_event):
+            assert received_event is cancel_event
+            observed.set()
+            assert received_event.wait(2)
+            return SimpleNamespace(status="failed", exit_code=-15, stdout="", stderr="",
+                                   termination_reason="Core lease lost", cleanup_ok=True)
+
+    server = SandboxMCPServer(runtime=Runtime(), repository_snapshot=source, working_directory=work,
+                              image=IMAGE, cancel_event=cancel_event)
+    timer = threading.Timer(0.1, cancel_event.set)
+    timer.start()
+    result = server.handle_request({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                                    "params": {"name": "sandbox_exec", "arguments": {"command": "sleep 10"}}})
+    timer.join()
+
+    assert observed.is_set()
+    assert result["result"]["isError"] is True
+
+
 def test_sandbox_mcp_rejects_other_tools_and_unbounded_commands(tmp_path):
     source = tmp_path / "source"
     work = tmp_path / "work"
@@ -221,6 +250,30 @@ def test_evaluator_uses_separate_readonly_source_and_writable_work(tmp_path):
     assert requests[0].working_directory == work
     assert requests[0].require_rootless is True
     assert requests[0].network_policy == "none"
+
+
+def test_evaluator_uses_runtime_cancellable_interface(tmp_path):
+    import threading
+
+    source, work = tmp_path / "source", tmp_path / "work"
+    source.mkdir(); work.mkdir()
+    received = []
+    event = threading.Event()
+
+    class Runtime:
+        capabilities = SimpleNamespace(rootless=True, memory_limit=True)
+        def run_cancellable(self, request, cancel_event):
+            received.append(cancel_event)
+            return SimpleNamespace(status="succeeded", exit_code=0, termination_reason=None,
+                                   cleanup_ok=True, stdout="ok", stderr="")
+
+    executor = HermesPodmanTaskExecutor(runtime=Runtime(), image=IMAGE, hermes_cli="hermes",
+                                        evaluator_commands={"maintenance": [["true"]]}, provider_env_keys=[])
+    outcome = executor._evaluate(SimpleNamespace(task_id="T-CANCEL", hard_timeout_seconds=60), source, work,
+                                 [["true"]], remaining_seconds=60, cancel_event=event)
+
+    assert outcome["passed"] is True
+    assert received == [event]
 
 
 def test_executor_mocked_hermes_path_builds_baseline_parent_candidate(tmp_path, monkeypatch):

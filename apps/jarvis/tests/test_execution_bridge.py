@@ -204,15 +204,18 @@ def test_run_bounded_terminates_process_group_when_cancelled(tmp_path):
     timer = threading.Timer(0.3, cancelled.set)
     timer.start()
     started = time.monotonic()
+    cancel_file = tmp_path / "cancel"
     result = HermesPodmanTaskExecutor._run_bounded(
         ["/bin/sh", "-c", "sleep 10"], cwd=tmp_path, env=os.environ,
         timeout_seconds=5, stdout_limit=1024, stderr_limit=1024, cancel_event=cancelled,
+        cancel_file=cancel_file,
     )
     timer.join()
 
     assert result["termination_reason"] == "Core lease lost"
     assert time.monotonic() - started < 3
     assert result["exit_code"] is not None
+    assert cancel_file.is_file()
 
 
 def test_lifecycle_projection_failure_does_not_undo_durable_acceptance(tmp_path, monkeypatch):

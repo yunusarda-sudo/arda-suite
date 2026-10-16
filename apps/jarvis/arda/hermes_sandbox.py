@@ -39,7 +39,8 @@ class SandboxMCPServer:
                  working_directory: Path, image: str, max_tool_calls: int = 100,
                  max_duration_seconds: int = 1800, max_command_bytes: int = 16_384,
                  timeout_seconds: int = 300, memory_mb: int = 2048,
-                 disk_limit_bytes: int = 512 * 1024 * 1024, audit_path: Path | None = None):
+                 disk_limit_bytes: int = 512 * 1024 * 1024, audit_path: Path | None = None,
+                 cancel_event: threading.Event | None = None):
         if not _IMAGE.fullmatch(image):
             raise ValueError("image must be pinned by sha256 digest")
         if getattr(runtime, "image", image) != image:
@@ -64,6 +65,7 @@ class SandboxMCPServer:
         self.memory_mb = memory_mb
         self.disk_limit_bytes = disk_limit_bytes
         self.audit_path = Path(audit_path) if audit_path is not None else None
+        self.cancel_event = cancel_event or threading.Event()
         self.started = time.monotonic()
         self.calls = 0
 
@@ -124,7 +126,11 @@ class SandboxMCPServer:
                                            memory_required=True), timeout_seconds=min(timeout, self.timeout_seconds),
             output_limits=OutputLimits(stdout_bytes=65536, stderr_bytes=65536))
         try:
-            result = self.runtime.run(request)
+            run_cancellable = getattr(self.runtime, "run_cancellable", None)
+            if callable(run_cancellable):
+                result = run_cancellable(request, self.cancel_event)
+            else:
+                result = self.runtime.run(request)
         except Exception as exc:  # fail closed and avoid returning host paths
             self._audit_call(command, "runtime_error")
             return self._tool_result(request_id, f"sandbox execution failed: {type(exc).__name__}", True)
@@ -178,6 +184,26 @@ def main() -> int:
     work = Path(os.environ["ARDA_SANDBOX_WORK"])
     image = os.environ["ARDA_SANDBOX_IMAGE"]
     runtime = PodmanRuntime.from_host(image=image, podman_path=os.environ.get("ARDA_PODMAN_PATH", "podman"))
+    cancel_event = threading.Event()
+    cancel_path = os.environ.get("ARDA_SANDBOX_CANCEL_FILE")
+    watcher_stop = threading.Event()
+    watcher = None
+    if cancel_path:
+        def watch_cancel_file() -> None:
+            while not watcher_stop.wait(0.1):
+                try:
+                    if Path(cancel_path).is_file():
+                        cancel_event.set()
+                        return
+                except OSError:
+                    cancel_event.set()
+                    return
+        watcher = threading.Thread(target=watch_cancel_file, name="arda-cancel-watch", daemon=True)
+        watcher.start()
+    def request_cancel(_signum, _frame) -> None:
+        cancel_event.set()
+    signal.signal(signal.SIGTERM, request_cancel)
+    signal.signal(signal.SIGINT, request_cancel)
     server = SandboxMCPServer(runtime=runtime, repository_snapshot=source, working_directory=work,
                               image=image,
                               max_tool_calls=int(os.environ.get("ARDA_SANDBOX_MAX_CALLS", "100")),
@@ -186,8 +212,14 @@ def main() -> int:
                               timeout_seconds=int(os.environ.get("ARDA_SANDBOX_COMMAND_TIMEOUT", "300")),
                               memory_mb=int(os.environ.get("ARDA_SANDBOX_MEMORY_MB", "2048")),
                               disk_limit_bytes=int(os.environ.get("ARDA_SANDBOX_DISK_BYTES", str(512*1024*1024))),
-                              audit_path=Path(os.environ["ARDA_SANDBOX_AUDIT"]) if os.environ.get("ARDA_SANDBOX_AUDIT") else None)
-    serve_stdio(server)
+                              audit_path=Path(os.environ["ARDA_SANDBOX_AUDIT"]) if os.environ.get("ARDA_SANDBOX_AUDIT") else None,
+                              cancel_event=cancel_event)
+    try:
+        serve_stdio(server)
+    finally:
+        watcher_stop.set()
+        if watcher is not None:
+            watcher.join(timeout=0.5)
     return 0
 
 
@@ -283,7 +315,8 @@ class HermesPodmanTaskExecutor:
                                        evidence={"hermes": hermes, "sandbox_audit": audit, "changed_paths": changed})
             before_evaluation = self._workspace_digest(work)
             evaluation = self._evaluate(task, source, work, commands,
-                                        remaining_seconds=task.hard_timeout_seconds - (time.monotonic() - started))
+                                        remaining_seconds=task.hard_timeout_seconds - (time.monotonic() - started),
+                                        cancel_event=cancel_event)
             if cancel_event.is_set():
                 return ExecutionResult(WorkResult.INVALID.value, "Core lease was lost", evidence={"hermes": hermes})
             if before_evaluation != self._workspace_digest(work):
@@ -321,6 +354,7 @@ class HermesPodmanTaskExecutor:
         query_file.write_text(self._prompt(task), encoding="utf-8")
         mcp_env = {"ARDA_SANDBOX_SOURCE": str(source), "ARDA_SANDBOX_WORK": str(work),
                    "ARDA_SANDBOX_IMAGE": self.image, "ARDA_SANDBOX_AUDIT": str(audit_path),
+                   "ARDA_SANDBOX_CANCEL_FILE": str(root / "cancel"),
                    "ARDA_PODMAN_PATH": self.podman_path, "HOME": os.environ.get("HOME", str(Path.home())),
                    "ARDA_SANDBOX_MAX_SECONDS": str(min(task.hard_timeout_seconds, 1800)),
                    "ARDA_SANDBOX_MAX_CALLS": str(min(max(task.max_turns * 4, 1), 200)),
@@ -349,7 +383,7 @@ class HermesPodmanTaskExecutor:
         completed = self._run_bounded(argv, cwd=work, env=env,
                                       timeout_seconds=task.hard_timeout_seconds,
                                       stdout_limit=2 * 1024 * 1024, stderr_limit=64 * 1024,
-                                      cancel_event=cancel_event)
+                                      cancel_event=cancel_event, cancel_file=root / "cancel")
         if completed["termination_reason"]:
             return {"error": f"Hermes {completed['termination_reason']}", "exit_code": completed["exit_code"],
                     "tool_calls": 0, "stdout_sha256": completed["stdout_sha256"],
@@ -374,7 +408,8 @@ class HermesPodmanTaskExecutor:
     @staticmethod
     def _run_bounded(argv: Sequence[str], *, cwd: Path, env: Mapping[str, str],
                      timeout_seconds: float, stdout_limit: int, stderr_limit: int,
-                     cancel_event: threading.Event | None = None) -> dict[str, Any]:
+                     cancel_event: threading.Event | None = None,
+                     cancel_file: Path | None = None) -> dict[str, Any]:
         process = subprocess.Popen(list(argv), cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         limits = {process.stdout: stdout_limit, process.stderr: stderr_limit}
@@ -410,12 +445,15 @@ class HermesPodmanTaskExecutor:
             if process.poll() is not None and not selector.get_map():
                 break
         if reason:
+            if reason == "Core lease lost" and cancel_file is not None:
+                fd = os.open(cancel_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                os.close(fd)
             try:
                 os.killpg(process.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
         try:
-            process.wait(timeout=1 if reason else max(0.1, deadline - time.monotonic()))
+            process.wait(timeout=10 if reason == "Core lease lost" else 1 if reason else max(0.1, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
@@ -441,7 +479,8 @@ class HermesPodmanTaskExecutor:
                 "\nForbidden paths:\n" + "\n".join(f"- {item}" for item in task.forbidden_paths))
 
     def _evaluate(self, task: WorkTask, source: Path, work: Path, commands: Sequence[Sequence[str]],
-                  *, remaining_seconds: float) -> dict[str, Any]:
+                  *, remaining_seconds: float, cancel_event: threading.Event | None = None) -> dict[str, Any]:
+        cancel_event = cancel_event or threading.Event()
         checks = []
         if len(commands) > 20 or remaining_seconds <= 0:
             return {"passed": False, "checks": [], "error": "evaluation budget exhausted"}
