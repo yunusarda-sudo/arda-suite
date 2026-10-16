@@ -14,9 +14,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from arda.acceptance import AcceptanceCoordinator
 from arda.autonomous_work_loop import WorkResult, WorkTask
 from arda.awareness import TaskStore
-from arda.core import Database, EventLog, Job, JobQueue, bootstrap_runtime_database
+from arda.core import Database, EventLog, Job, JobQueue, _iso, _utc_now, bootstrap_runtime_database
 from arda.organization import OrganizationRegistry
 
 
@@ -24,7 +25,7 @@ from arda.organization import OrganizationRegistry
 class ExecutionResult:
     result: str
     reason: str = ""
-    accepted_sha: str | None = None
+    candidate_sha: str | None = None
     artifact_path: str | None = None
     episode_id: str | None = None
     attempts: int = 1
@@ -153,6 +154,7 @@ class ExecutionBridge:
         db = bootstrap_runtime_database(self.db_path)
         try:
             queue = JobQueue(db, lease_seconds=self.lease_seconds)
+            AcceptanceCoordinator(db, lease_seconds=self.lease_seconds).reconcile()
             try:
                 job = queue.claim(self.worker_id, job_type=self.JOB_TYPE)
             except LookupError:
@@ -209,29 +211,42 @@ class ExecutionBridge:
                 heartbeat_thread.join(timeout=1)
 
             payload = result.payload()
+            payload["accepted_sha"] = None  # only the Core coordinator may assert acceptance
             artifact_bytes = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
-            artifact_ref = result.artifact_path or f"control-plane://jobs/{job.id}/result.json"
+            artifact_ref = result.artifact_path or f"control-plane://jobs/{job.id}/{job.attempt_count}/result.json"
             artifact_sha = hashlib.sha256(artifact_bytes).hexdigest()
+            accepted_sha = None
             try:
                 queue.record_artifact(job.id, "execution-result", artifact_ref, artifact_sha,
                                       content=artifact_bytes, lease_token=token)
-                terminal_status = "done" if result.result == WorkResult.PASS.value else "blocked"
-                task_store.update_status(task.task_id, terminal_status, expected_version=task_row["version"])
                 if result.result == WorkResult.PASS.value:
-                    queue.complete(job.id, token, result=payload)
-                    if result.accepted_sha and db.execute(
-                        "SELECT 1 FROM organization_profiles WHERE project_id=?",
-                        (task_row["project_id"],),
-                    ).fetchone():
-                        OrganizationRegistry(db).advance_baseline(
-                            task_row["project_id"], result.accepted_sha
-                        )
+                    if not result.candidate_sha:
+                        raise ValueError("PASS result is missing a verified candidate SHA")
+                    coordinator = AcceptanceCoordinator(db, lease_seconds=self.lease_seconds)
+                    intent_id = coordinator.prepare(
+                        job_id=job.id, lease_token=token, lease_generation=job.attempt_count,
+                        task_id=task.task_id, repo_path=task.repo, ref_name=task.baseline_ref,
+                        expected_old_sha=task.baseline_sha, candidate_sha=result.candidate_sha,
+                        evidence_sha256=artifact_sha, result_payload=payload,
+                    )
+                    accepted_sha = coordinator.promote(intent_id, lease_token=token)
+                    payload["accepted_sha"] = accepted_sha
+                    terminal_status = "done"
                     if db.execute(
                         "SELECT 1 FROM organization_profiles WHERE project_id=?",
                         (task_row["project_id"],),
                     ).fetchone():
-                        OrganizationRegistry(db).reconcile_objective_lifecycle(task_row["project_id"])
+                        try:
+                            OrganizationRegistry(db).reconcile_objective_lifecycle(task_row["project_id"])
+                        except Exception as exc:  # acceptance is already durable; lifecycle projection is repairable
+                            EventLog(db).append(
+                                "organization.lifecycle_reconcile_failed", project_id=task_row["project_id"],
+                                source="execution-bridge", source_id=task.task_id,
+                                payload={"error": type(exc).__name__, "accepted_sha": accepted_sha},
+                            )
                 else:
+                    terminal_status = "blocked"
+                    task_store.update_status(task.task_id, terminal_status, expected_version=task_row["version"])
                     queue.fail(job.id, token, error=result.reason or result.result, retryable=False)
             except Exception as exc:  # noqa: BLE001 - persist a safe terminal failure
                 error = f"persistence failure: {type(exc).__name__}"
@@ -243,7 +258,7 @@ class ExecutionBridge:
                 payload={"job_id": job.id, **payload},
             )
             return BridgeRun(job.id, task.task_id, result.result, terminal_status,
-                             result.accepted_sha, result.episode_id)
+                             accepted_sha, result.episode_id)
         finally:
             db.close()
 
@@ -265,12 +280,26 @@ class ExecutionBridge:
     def _mark_failed(db: Database, queue: JobQueue, task_store: TaskStore,
                      task: WorkTask, task_row: Any, job_id: str, token: str, error: str) -> None:
         try:
-            current = task_store.get(task.task_id)
-            if current["status"] not in {"done", "cancelled", "blocked"}:
-                task_store.update_status(task.task_id, "blocked", expected_version=current["version"])
-        except Exception:
-            pass
-        try:
-            queue.fail(job_id, token, error=error, retryable=False)
+            now = _iso(_utc_now())
+            with db.transaction():
+                job = queue._verify_lease(job_id, token, ("leased", "running"))
+                current = task_store.get(task.task_id)
+                if current["status"] not in {"done", "cancelled", "blocked"}:
+                    db.execute(
+                        "UPDATE tasks SET status='blocked', completed_at=NULL, updated_at=?, version=version+1 WHERE id=? AND version=?",
+                        (now, task.task_id, current["version"]),
+                    )
+                    EventLog(db).append("task.status_changed", project_id=current["project_id"],
+                                        source="execution-bridge", source_id=task.task_id,
+                                        payload={"status": "blocked", "reason": error})
+                db.execute(
+                    """UPDATE jobs SET status='failed', error=?, finished_at=?, updated_at=?,
+                         leased_by=NULL, lease_token=NULL, lease_expires_at=NULL, version=version+1
+                       WHERE id=? AND lease_token=?""",
+                    (error, now, now, job.id, token),
+                )
+                EventLog(db).append("job.failed", project_id=job.project_id,
+                                    source="execution-bridge", source_id=job_id,
+                                    payload={"error": error, "retryable": False})
         except Exception:
             pass

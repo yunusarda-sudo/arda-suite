@@ -18,6 +18,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
+MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -738,6 +740,55 @@ class Database:
                 self.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                                   (15, _iso(_utc_now())))
             migrations.append(15)
+        applied = {row[0] for row in self.conn.execute("SELECT version FROM schema_migrations")}
+        if 16 not in applied:
+            with self.transaction():
+                self.conn.execute(
+                    """CREATE TABLE acceptance_intents (
+                        intent_id TEXT PRIMARY KEY,
+                        job_id TEXT NOT NULL,
+                        task_id TEXT NOT NULL,
+                        lease_generation INTEGER NOT NULL,
+                        repo_path TEXT NOT NULL,
+                        ref_name TEXT NOT NULL,
+                        expected_old_sha TEXT NOT NULL,
+                        candidate_sha TEXT NOT NULL,
+                        evidence_sha256 TEXT NOT NULL,
+                        result_json TEXT NOT NULL,
+                        status TEXT NOT NULL CHECK(status IN ('prepared','accepted','aborted','conflict')),
+                        error TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE(job_id, lease_generation),
+                        FOREIGN KEY(job_id) REFERENCES jobs(id),
+                        FOREIGN KEY(task_id) REFERENCES tasks(id)
+                    )"""
+                )
+                self.conn.execute("CREATE INDEX acceptance_intents_status_idx ON acceptance_intents(status, created_at)")
+                self.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                                  (16, _iso(_utc_now())))
+            migrations.append(16)
+        applied = {row[0] for row in self.conn.execute("SELECT version FROM schema_migrations")}
+        if 17 not in applied:
+            with self.transaction():
+                self.conn.execute("ALTER TABLE artifacts ADD COLUMN content BLOB")
+                self.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                                  (17, _iso(_utc_now())))
+            migrations.append(17)
+        applied = {row[0] for row in self.conn.execute("SELECT version FROM schema_migrations")}
+        if 18 not in applied:
+            with self.transaction():
+                self.conn.execute(
+                    """CREATE TRIGGER artifacts_no_update BEFORE UPDATE ON artifacts BEGIN
+                        SELECT RAISE(ABORT, 'artifacts are immutable'); END"""
+                )
+                self.conn.execute(
+                    """CREATE TRIGGER artifacts_no_delete BEFORE DELETE ON artifacts BEGIN
+                        SELECT RAISE(ABORT, 'artifacts are immutable'); END"""
+                )
+                self.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                                  (18, _iso(_utc_now())))
+            migrations.append(18)
         return migrations
 
 
@@ -971,25 +1022,29 @@ class JobQueue:
         content: bytes,
         lease_token: str | None = None,
     ) -> str:
+        if len(content) > MAX_ARTIFACT_BYTES:
+            raise ValueError(f"artifact exceeds {MAX_ARTIFACT_BYTES} byte limit")
         if lease_token is not None:
             self._verify_lease(job_id, lease_token, ("leased", "running"))
         actual_sha256 = hashlib.sha256(content).hexdigest()
         if actual_sha256 != expected_sha256:
             raise ValueError("artifact sha256 mismatch")
         existing = self.db.execute(
-            """SELECT id, sha256 FROM artifacts
+            """SELECT id, sha256, content FROM artifacts
                 WHERE job_id=? AND kind=? AND path_or_ref=?""",
             (job_id, kind, path_or_ref),
         ).fetchone()
         if existing is not None:
             if existing["sha256"] != actual_sha256:
                 raise ValueError("artifact identity conflict")
+            if existing["content"] is None or bytes(existing["content"]) != content:
+                raise ValueError("artifact content conflict")
             return existing["id"]
         artifact_id = f"art_{uuid.uuid4().hex}"
         self.db.execute(
-            """INSERT INTO artifacts(id, job_id, kind, path_or_ref, sha256, verified, created_at)
-                VALUES (?, ?, ?, ?, ?, 1, ?)""",
-            (artifact_id, job_id, kind, path_or_ref, actual_sha256, _iso(self.clock())),
+            """INSERT INTO artifacts(id, job_id, kind, path_or_ref, sha256, verified, created_at, content)
+                VALUES (?, ?, ?, ?, ?, 1, ?, ?)""",
+            (artifact_id, job_id, kind, path_or_ref, actual_sha256, _iso(self.clock()), content),
         )
         return artifact_id
 
