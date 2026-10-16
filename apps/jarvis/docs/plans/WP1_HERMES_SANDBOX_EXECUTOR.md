@@ -1,6 +1,6 @@
 # WP-1: Hermes sandbox executor and trusted acceptance
 
-Status: **IMPLEMENTED LOCALLY; LIVE RUNTIME GATE BLOCKED**
+Status: **IMPLEMENTED IN DRAFT PR #7; LIVE RUNTIME GATE BLOCKED**
 
 This plan follows `ARDA_AUTONOMOUS_OS_WORKPACKAGES.md` supplied by the user. WP-1 is the P0 secure-execution package on the existing draft PR #7 branch. The attachment supplies the master work-package instructions; the current execution is authorized by the user's earlier direct instruction to continue WP-1 from PR #7. No main merge, Pi access, or deployment is authorized here.
 
@@ -60,6 +60,7 @@ The Hermes MCP tool configuration uses a single explicit server with an include 
 - [ ] Review exact Hermes version behavior against its installed CLI and verify its effective tool list contains only the ARDA MCP tool.
 - [ ] Run a real rootless Podman task, real Hermes coding task, host-secret/network/path-denial tests, and live Core acceptance/recovery test.
 - [ ] Run the physical Pi security smoke and document resource/quota behavior.
-- [ ] Push the complete, reviewed WP-1 delivery to the existing draft PR; do not merge or deploy.
+- [x] Push the integrated implementation to existing draft PR #7 for review; it remains draft and unmerged.
+- [ ] Complete the live Hermes/Podman and physical Pi acceptance gates before calling WP-1 complete.
 
 WP-2 self-dispatch remains gated on the physical WP-1 security/recovery acceptance. Existing mission/objective scheduling does not itself establish autonomous work discovery.
