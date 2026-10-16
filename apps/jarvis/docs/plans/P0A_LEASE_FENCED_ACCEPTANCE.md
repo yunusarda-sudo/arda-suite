@@ -78,7 +78,7 @@ changes; do not reset accepted refs or touch the live Pi.
 - [x] Add regression tests first, including child-process exits around Git/SQLite boundaries.
 - [x] Implement coordinator, recovery, immutable result artifacts, and candidate-only harness.
 - [x] Run available focused verification and review security-sensitive paths.
-- [ ] Prepare PR without merge/deployment.
+- [x] Open draft PR without merge/deployment: https://github.com/yunusarda-sudo/arda-suite/pull/7.
 
 ## Verification snapshot
 
