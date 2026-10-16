@@ -81,6 +81,24 @@ class GitHubReadOnlyAdapter:
             failed_count = 1
         return {"state": raw.get("state", "unknown"), "failed_count": failed_count}
 
+    def list_workflow_runs(self, repo: str, *, per_page: int = 25) -> list[dict[str, Any]]:
+        if not isinstance(per_page, int) or isinstance(per_page, bool) or not 1 <= per_page <= 100:
+            raise ValueError("per_page must be between 1 and 100")
+        raw = self._expect_dict(self._get(
+            f"{_repo_path(repo)}/actions/runs", {"per_page": str(per_page)}))
+        runs = self._expect_list(raw.get("workflow_runs"))
+        return [{
+            "id": item.get("id"),
+            "name": item.get("name", ""),
+            "status": item.get("status", "unknown"),
+            "conclusion": item.get("conclusion"),
+            "head_branch": item.get("head_branch", ""),
+            "head_sha": item.get("head_sha", ""),
+            "html_url": item.get("html_url"),
+            "run_attempt": item.get("run_attempt", 1),
+            "updated_at": item.get("updated_at"),
+        } for item in runs]
+
     def _get(self, path: str, params: dict[str, str]) -> Any:
         return self._transport(path, params)
 

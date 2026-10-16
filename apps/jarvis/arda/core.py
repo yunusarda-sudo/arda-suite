@@ -738,6 +738,74 @@ class Database:
                 self.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                                   (15, _iso(_utc_now())))
             migrations.append(15)
+        applied = {row[0] for row in self.conn.execute("SELECT version FROM schema_migrations")}
+        if 16 not in applied:
+            with self.transaction():
+                for statement in (
+                    """CREATE TABLE organization_missions (
+                        id TEXT PRIMARY KEY,
+                        project_id TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        objective TEXT NOT NULL,
+                        acceptance_metrics_json TEXT NOT NULL,
+                        allowed_repositories_json TEXT NOT NULL,
+                        allowed_domains_json TEXT NOT NULL,
+                        delegated_scopes_json TEXT NOT NULL,
+                        allowed_risks_json TEXT NOT NULL,
+                        budget_json TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','paused','cancelled','completed','expired')),
+                        expires_at TEXT NOT NULL,
+                        pause_reason TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        FOREIGN KEY(project_id) REFERENCES projects(id)
+                    )""",
+                    "CREATE INDEX organization_missions_project_state_idx ON organization_missions(project_id, status, expires_at)",
+                    """CREATE TABLE director_signals (
+                        id TEXT PRIMARY KEY,
+                        mission_id TEXT NOT NULL,
+                        project_id TEXT NOT NULL,
+                        provider TEXT NOT NULL,
+                        source_key TEXT NOT NULL,
+                        signal_type TEXT NOT NULL,
+                        source_updated_at TEXT NOT NULL,
+                        observed_at TEXT NOT NULL,
+                        fresh_until TEXT NOT NULL,
+                        payload_sha256 TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','processed','ignored')),
+                        created_at TEXT NOT NULL,
+                        UNIQUE(mission_id, provider, source_key, payload_sha256),
+                        FOREIGN KEY(mission_id) REFERENCES organization_missions(id),
+                        FOREIGN KEY(project_id) REFERENCES projects(id)
+                    )""",
+                    "CREATE INDEX director_signals_pending_idx ON director_signals(mission_id, status, observed_at)",
+                    """CREATE TABLE director_proposals (
+                        id TEXT PRIMARY KEY,
+                        mission_id TEXT NOT NULL,
+                        signal_id TEXT NOT NULL,
+                        project_id TEXT NOT NULL,
+                        idempotency_key TEXT NOT NULL UNIQUE,
+                        status TEXT NOT NULL CHECK(status IN ('proposed','rejected','accepted','queued','verified','failed','deferred')),
+                        rationale TEXT NOT NULL,
+                        contract_json TEXT,
+                        decision_json TEXT NOT NULL DEFAULT '{}',
+                        task_id TEXT,
+                        job_id TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        FOREIGN KEY(mission_id) REFERENCES organization_missions(id),
+                        FOREIGN KEY(signal_id) REFERENCES director_signals(id),
+                        FOREIGN KEY(project_id) REFERENCES projects(id)
+                    )""",
+                    "CREATE INDEX director_proposals_mission_status_idx ON director_proposals(mission_id, status, created_at)",
+                ):
+                    self.conn.execute(statement)
+                self.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                                  (16, _iso(_utc_now())))
+            migrations.append(16)
         return migrations
 
 
