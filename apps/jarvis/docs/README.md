@@ -10,13 +10,13 @@ This index links to the maintained technical documentation in the Jarvis and ARD
 - [Raspberry Pi install script](../scripts/install_rpi_service.sh)
 - [Security policy](../SECURITY.md)
 
-## ARDA Core and Hermes
-
-- [Task intake contract](../ARDA_CORE_TASK_INTAKE_CONTRACT.md)
-- [ARDA Core v0.1 specification](../ARDA_CORE_V0_1_SPEC.md)
-- [Hermes orchestration contract](../HERMES_V0_1_ORCHESTRATION_CONTRACT.md)
-- [Capability ontology](../ARDA_CORE_CAPABILITY_ONTOLOGY_V0_1.md)
-- [Provider evaluation model](../ARDA_CORE_ADR_001_PROVIDER_CAPABILITY_EVALUATION_MODEL.md)
+## ARDA Core and Hermes Specifications
+- [Full Specifications Index](specs/README.md)
+- [Task intake contract](specs/ARDA_CORE_TASK_INTAKE_CONTRACT.md)
+- [ARDA Core v0.1 specification](specs/ARDA_CORE_V0_1_SPEC.md)
+- [Hermes orchestration contract](specs/HERMES_V0_1_ORCHESTRATION_CONTRACT.md)
+- [Capability ontology](specs/ARDA_CORE_CAPABILITY_ONTOLOGY_V0_1.md)
+- [Provider evaluation model](specs/ARDA_CORE_ADR_001_PROVIDER_CAPABILITY_EVALUATION_MODEL.md)
 - [MCP gateway contract](arda-core-mcp-gateway-contract-v0.1.md)
 - [Computer control setup](computer-control-setup.md)
 - [Wake word training](wake-word-training.md)

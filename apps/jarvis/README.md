@@ -15,7 +15,7 @@ See the [documentation index](docs/README.md) for architecture, operational guid
 
 The repository contains code at different maturity levels. The desktop assistant is the historical base application; ARDA Core and Hermes work is evolving and should be treated as experimental unless a specific component has an acceptance report. Hardware, external providers, and local service integrations require separate setup. Tests do not by themselves verify those external paths.
 
-The root-level `ARDA_*`, `HERMES_*`, `SPEC.md`, and related design documents preserve the development history. They are design and acceptance records, not a guarantee that every proposed capability is available in a production deployment.
+The archived design records and specifications (`ARDA_*`, `HERMES_*`, etc.) are cataloged in [`docs/specs/`](docs/specs/README.md). They preserve the development history and acceptance records.
 
 ---
 
@@ -32,7 +32,7 @@ Varsayılan **push-to-talk** (⌘⇧A): bas → konuş → Jarvis ne istediğini
 
 Raspberry Pi/Linux üzerinde menubar yerine headless `daemon` modu ve offline Vosk STT
 kullanılabilir. Kurulum örneği için [`scripts/install_rpi_service.sh`](scripts/install_rpi_service.sh)
-dosyasına bakın; fiziksel Pi doğrulaması bu kaynak paketi hazırlanırken yapılamadı.
+dosyasına bakın.
 
 > Varsayılan olarak **her zaman dinlemez** — mikrofon yalnızca sen tetikleyince açılır.
 > İsteğe bağlı wake word (her-zaman-dinle) menüden açılabilir (sürekli mic + kendi .onnx modeli).
@@ -40,8 +40,9 @@ dosyasına bakın; fiziksel Pi doğrulaması bu kaynak paketi hazırlanırken ya
 > **Not:** Kullanıcıya görünen ad **Jarvis**'tir; iç Python paketi tarihsel olarak
 > `arda` adını korur (importlar değişmedi).
 
-- **Plan:** `Arda-Asistan-Proje-Plani.md`
+- **Plan:** [`docs/specs/Arda-Asistan-Proje-Plani.md`](docs/specs/Arda-Asistan-Proje-Plani.md)
 - **Teknik spec + karar günlüğü:** `SPEC.md`
+- **Tüm Spesifikasyonlar & Kontratlar:** [`docs/specs/`](docs/specs/README.md)
 
 ## Durum
 Çekirdek + Siri yönlendirici tamam (TDD, kapsamlı test paketi): push-to-talk tetik, beyin
