@@ -137,7 +137,7 @@ def test_provider_queries_are_read_only_snapshots():
 
 def test_sqlite_store_persists_append_only_descriptors_evaluations_and_mapping(tmp_path):
     db = Database(tmp_path / "capabilities.sqlite3")
-    assert db.migrate() == [*range(1, 19), 21]
+    assert db.migrate() == [*range(1, 19), 21, 22]
     store = SQLiteCapabilityStore(db)
     cap = capability(capability_id="verification.alignment")
     prov = provider()

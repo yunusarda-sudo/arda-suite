@@ -14,6 +14,7 @@ from arda.worker_protocol import (
     WorkerProtocolClient,
     WorkerProtocolServer,
     WorkerCapabilityError,
+    WorkerCancellationRequested,
     WorkerLeaseGuard,
     WorkerLeaseLost,
 )
@@ -130,6 +131,43 @@ def test_lease_guard_renews_and_cancels_on_transport_loss(db):
         if guard is not None:
             guard.close()
         http.stop()
+
+
+def test_controller_cancellation_reaches_worker_heartbeat_and_is_acknowledged(db, protocol):
+    import threading
+    import time
+
+    server, _transport, client = protocol
+    queue = JobQueue(db)
+    job = queue.enqueue("test", "cancel cooperatively", idempotency_key="protocol-cancel")
+    claim = client.request("claim", request_id="cancel-claim")
+    client.request("start", {"job_id": job.id, "lease_token": claim["lease_token"]},
+                   request_id="cancel-start")
+    queue.request_cancel(job.id, requested_by="operator")
+    guard = WorkerLeaseGuard(client, job.id, claim["lease_token"], run_id="cancel-run",
+                             heartbeat_interval=0.01).start()
+    try:
+        deadline = time.monotonic() + 2
+        while not guard.cancel_event.is_set() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert guard.cancellation_requested, repr(guard._error)
+        with pytest.raises(WorkerCancellationRequested):
+            guard.ensure_current()
+        result = client.request("cancel_ack", {"job_id": job.id,
+                                                  "lease_token": claim["lease_token"]},
+                                request_id="cancel-ack")
+        assert result["status"] == "cancelled"
+        assert queue.get(job.id).status == "cancelled"
+    finally:
+        guard.close()
+
+
+def test_controller_can_cancel_queued_job_without_worker(db):
+    job = JobQueue(db).enqueue("test", "cancel before claim", idempotency_key="cancel-queued")
+    cancelled = JobQueue(db).request_cancel(job.id, requested_by="operator")
+    assert cancelled.status == "cancelled"
+    with pytest.raises(LookupError, match="no queued job"):
+        JobQueue(db).claim("mac-primary", job_type="test")
 
 
 def test_replay_returns_same_response_and_payload_conflict_is_rejected(db, protocol):

@@ -10,7 +10,7 @@ from typing import Any
 from arda.live_research import LiveSourceAcquirer, SafeHTTPFetcher, SearchAdapter
 from arda.research_worker import FixtureSourceAdapter, ResearchBudgetError, ResearchContractError, ResearchSourceError, ResearchTask, build_research, canonical_json
 from arda.research_synthesis import ModelGateway, render_synthesis_markdown, synthesize_research
-from arda.worker_protocol import WorkerLeaseGuard, WorkerProtocolClient
+from arda.worker_protocol import WorkerCancellationRequested, WorkerLeaseGuard, WorkerProtocolClient
 
 
 @dataclass(frozen=True)
@@ -76,6 +76,7 @@ class LiveResearchWorker:
     def run_once(self, *, run_id: str) -> dict[str, Any]:
         claim = self.client.request("claim", {"job_type": "research"}, request_id=f"{run_id}:claim")
         lease = {"job_id": claim["job_id"], "lease_token": claim["lease_token"]}
+        guard = None
         try:
             self.client.request("start", lease, request_id=f"{run_id}:start")
             with WorkerLeaseGuard(self.client, lease["job_id"], lease["lease_token"],
@@ -113,7 +114,10 @@ class LiveResearchWorker:
             return result
         except Exception as exc:
             try:
-                self.client.request("fail", {**lease, "error": exc.__class__.__name__, "retryable": isinstance(exc, (ResearchSourceError, ResearchBudgetError))}, request_id=f"{run_id}:fail")
+                if isinstance(exc, WorkerCancellationRequested) or (guard is not None and guard.cancellation_requested):
+                    self.client.request("cancel_ack", lease, request_id=f"{run_id}:cancel-ack")
+                else:
+                    self.client.request("fail", {**lease, "error": exc.__class__.__name__, "retryable": isinstance(exc, (ResearchSourceError, ResearchBudgetError))}, request_id=f"{run_id}:fail")
             except Exception:
                 pass
             raise

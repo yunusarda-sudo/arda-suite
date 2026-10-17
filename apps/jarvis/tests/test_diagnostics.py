@@ -67,7 +67,7 @@ def test_doctor_is_read_only_and_reports_unknown_backup(tmp_path, capsys):
 
     result = json.loads(capsys.readouterr().out)
     assert result["sqlite"]["ok"] is True
-    assert result["migrations"]["current"] == 21
+    assert result["migrations"]["current"] == 22
     assert result["event_log"]["ok"] is True
     assert result["backup"]["status"] == "unknown"
     check = Database(path)

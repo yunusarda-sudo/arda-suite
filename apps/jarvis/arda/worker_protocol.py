@@ -38,6 +38,10 @@ class WorkerLeaseLost(RuntimeError):
     """The worker can no longer prove ownership of its current job lease."""
 
 
+class WorkerCancellationRequested(RuntimeError):
+    """The controller requested a cooperative stop for this worker job."""
+
+
 def _worker_job_types(capabilities_json: str | None) -> tuple[str, ...]:
     try:
         capabilities = json.loads(capabilities_json or "[]")
@@ -193,7 +197,12 @@ class WorkerProtocolServer:
         if request.message_type == "heartbeat":
             job = self.queue.heartbeat(payload["job_id"], payload["lease_token"])
             self.registry.heartbeat(request.worker_id, request.auth_token)
-            return {"job_id": job.id, "status": job.status, "lease_token": job.lease_token}
+            row = self.db.execute("SELECT cancel_requested_at FROM jobs WHERE id=?", (job.id,)).fetchone()
+            return {"job_id": job.id, "status": job.status, "lease_token": job.lease_token,
+                    "cancel_requested": row["cancel_requested_at"] is not None}
+        if request.message_type == "cancel_ack":
+            job = self.queue.acknowledge_cancel(payload["job_id"], payload["lease_token"])
+            return {"job_id": job.id, "status": job.status}
         if request.message_type == "upload_artifact":
             content = base64.b64decode(payload["content_b64"], validate=True)
             artifact_id = self.queue.record_artifact(
@@ -271,6 +280,7 @@ class WorkerLeaseGuard:
         self._thread: threading.Thread | None = None
         self._error: Exception | None = None
         self._counter = 0
+        self.cancellation_requested = False
 
     def start(self) -> "WorkerLeaseGuard":
         if self._thread is not None:
@@ -283,10 +293,14 @@ class WorkerLeaseGuard:
         while not self._stop.wait(self.heartbeat_interval):
             self._counter += 1
             try:
-                self.client.request(
+                response = self.client.request(
                     "heartbeat", {"job_id": self.job_id, "lease_token": self.lease_token},
                     request_id=f"{self.run_id}:heartbeat:{self._counter}",
                 )
+                if response.get("cancel_requested"):
+                    self.cancellation_requested = True
+                    self.cancel_event.set()
+                    return
             except Exception as exc:  # noqa: BLE001 - loss must stop publication
                 self._error = exc
                 self.cancel_event.set()
@@ -294,6 +308,8 @@ class WorkerLeaseGuard:
 
     def ensure_current(self) -> None:
         if self.cancel_event.is_set():
+            if self.cancellation_requested:
+                raise WorkerCancellationRequested("controller requested worker cancellation")
             raise WorkerLeaseLost("worker lease renewal failed; result publication is fenced") from self._error
 
     def close(self) -> None:

@@ -61,22 +61,26 @@ class Database:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.path), timeout=30, isolation_level=None)
         self._transaction_lock = threading.RLock()
         self._savepoint_seq = 0
+        self.conn = sqlite3.connect(str(self.path), timeout=30, isolation_level=None,
+                                    check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.execute("PRAGMA busy_timeout = 30000")
 
     def close(self) -> None:
-        self.conn.close()
+        with self._transaction_lock:
+            self.conn.close()
 
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> sqlite3.Cursor:
-        return self.conn.execute(sql, params)
+        with self._transaction_lock:
+            return self.conn.execute(sql, params)
 
     def scalar(self, sql: str, params: tuple[Any, ...] = ()) -> Any:
-        return self.conn.execute(sql, params).fetchone()[0]
+        with self._transaction_lock:
+            return self.conn.execute(sql, params).fetchone()[0]
 
     def table_exists(self, name: str) -> bool:
         return bool(self.scalar(
@@ -830,6 +834,15 @@ class Database:
                 self.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                                   (21, _iso(_utc_now())))
             migrations.append(21)
+        applied = {row[0] for row in self.conn.execute("SELECT version FROM schema_migrations")}
+        if 22 not in applied:
+            with self.transaction():
+                self.conn.execute("ALTER TABLE jobs ADD COLUMN cancel_requested_at TEXT")
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (22, _iso(_utc_now())),
+                )
+            migrations.append(22)
         return migrations
 
 
@@ -1072,6 +1085,54 @@ class JobQueue:
                 (_iso(expires), _iso(now), job_id, lease_token),
             )
         return self.get(row["id"])
+
+    def request_cancel(self, job_id: str, *, requested_by: str) -> Job:
+        """Request cancellation; active workers retain their lease until they acknowledge."""
+        actor = str(requested_by or "").strip()[:128]
+        if not actor:
+            raise ValueError("requested_by is required")
+        now = _iso(self.clock())
+        with self.db.transaction():
+            row = self.db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            if row["status"] in {"succeeded", "failed", "cancelled"}:
+                return self.get(job_id)
+            if row["status"] in {"queued", "retry_wait"}:
+                self.db.execute(
+                    """UPDATE jobs SET status='cancelled', cancel_requested_at=?, finished_at=?,
+                        error='cancelled by operator', updated_at=?, version=version+1 WHERE id=?""",
+                    (now, now, now, job_id),
+                )
+                event_type = "job.cancelled"
+            elif row["status"] in {"leased", "running"}:
+                self.db.execute(
+                    "UPDATE jobs SET cancel_requested_at=COALESCE(cancel_requested_at, ?), "
+                    "updated_at=?, version=version+1 WHERE id=?",
+                    (now, now, job_id),
+                )
+                event_type = "job.cancel_requested"
+            else:
+                raise ValueError(f"job cannot be cancelled from status {row['status']}")
+            self.events.append(event_type, source="operator", source_id=job_id,
+                               payload={"requested_by": actor})
+        return self.get(job_id)
+
+    def acknowledge_cancel(self, job_id: str, lease_token: str) -> Job:
+        """Finalize a requested cancellation from the worker that owns the lease."""
+        now = _iso(self.clock())
+        with self.db.transaction():
+            row = self._verify_lease(job_id, lease_token, ("leased", "running"))
+            if row["cancel_requested_at"] is None:
+                raise ValueError("job has no pending cancellation request")
+            self.db.execute(
+                """UPDATE jobs SET status='cancelled', error='cancelled by operator', finished_at=?,
+                    updated_at=?, leased_by=NULL, lease_token=NULL, lease_expires_at=NULL,
+                    version=version+1 WHERE id=? AND lease_token=?""",
+                (now, now, job_id, lease_token),
+            )
+            self.events.append("job.cancelled", source="worker", source_id=job_id)
+        return self.get(job_id)
 
     def record_artifact(
         self,
