@@ -3,7 +3,7 @@ import sqlite3
 
 import pytest
 
-from arda.browser_sessions import BrowserGrantError, BrowserSessionRegistry
+from arda.browser_sessions import BrowserGrantError, BrowserSessionRegistry, close_revoked_browser_tabs
 from arda.core import Database
 from arda.awareness import ProjectRegistry
 
@@ -60,3 +60,62 @@ def test_browser_grant_rejects_unsafe_domain_scopes(db, domain):
     registry = BrowserSessionRegistry(db)
     with pytest.raises(ValueError):
         registry.create("project", [domain], created_by="operator")
+
+
+def test_revoked_browser_tabs_retry_after_failure_and_database_restart(tmp_path):
+    path = tmp_path / "core.sqlite3"
+    database = Database(path)
+    database.migrate()
+    ProjectRegistry(database).create("project-alpha", "Alpha")
+    registry = BrowserSessionRegistry(database)
+    grant = registry.create("project-alpha", ["example.com"], created_by="operator")
+    registry.track_tab(grant["session_id"], "project-alpha", "tab-1")
+    registry.revoke(grant["session_id"], revoked_by="operator")
+
+    class FlakyClient:
+        calls = 0
+
+        def close_tab(self, **_kwargs):
+            self.calls += 1
+            raise ConnectionError("browser service offline")
+
+    flaky = FlakyClient()
+    first = close_revoked_browser_tabs(registry, flaky)
+    assert first == {"closed": 0, "failed": 1, "pending": 1}
+    row = database.execute(
+        "SELECT close_attempts, last_close_error FROM browser_session_tabs WHERE session_id=?",
+        (grant["session_id"],),
+    ).fetchone()
+    assert tuple(row) == (1, "ConnectionError")
+    database.close()
+
+    recovered_db = Database(path)
+    recovered_db.migrate()
+    recovered_registry = BrowserSessionRegistry(recovered_db)
+    closed = []
+    recovered = close_revoked_browser_tabs(
+        recovered_registry, type("Client", (), {"close_tab": lambda _self, **kwargs: closed.append(kwargs)})(),
+    )
+    assert recovered == {"closed": 1, "failed": 0, "pending": 0}
+    assert closed == [{"user_id": grant["user_id"], "tab_id": "tab-1"}]
+    assert recovered_db.scalar(
+        "SELECT closed_at IS NOT NULL FROM browser_session_tabs WHERE session_id=?",
+        (grant["session_id"],),
+    ) == 1
+    recovered_db.close()
+
+
+def test_expired_browser_session_tabs_are_pending_cleanup(db):
+    now = datetime(2026, 10, 17, tzinfo=timezone.utc)
+    registry = BrowserSessionRegistry(db, clock=lambda: now)
+    grant = registry.create("project-alpha", ["example.com"], created_by="operator", ttl_seconds=60)
+    registry.track_tab(grant["session_id"], "project-alpha", "tab-expired")
+    assert registry.pending_close_count() == 0
+
+    registry.clock = lambda: now + timedelta(seconds=61)
+    closed = []
+    result = close_revoked_browser_tabs(
+        registry, type("Client", (), {"close_tab": lambda _self, **kwargs: closed.append(kwargs)})(),
+    )
+    assert result == {"closed": 1, "failed": 0, "pending": 0}
+    assert closed == [{"user_id": grant["user_id"], "tab_id": "tab-expired"}]

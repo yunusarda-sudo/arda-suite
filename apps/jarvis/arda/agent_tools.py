@@ -147,6 +147,9 @@ class ToolContext:
     browser_tabs: set[str] = field(default_factory=set)
     # Must consult the durable Core grant on every use; absent means browser work is disabled.
     browser_session_authorize: Callable[[str | None], dict] | None = None
+    browser_tab_registered: Callable[[str], None] | None = None
+    browser_tab_closed: Callable[[str, str | None], None] | None = None
+    browser_session_recover: Callable[[], dict] | None = None
     process_runner: Callable | None = None
 
 
@@ -392,6 +395,10 @@ def _browser_health(params: dict, ctx: ToolContext) -> ToolResult:
 def _browser_grant(ctx: ToolContext, url: str | None = None) -> dict:
     if ctx.browser_session_authorize is None:
         raise BrowserError("Süreli ve proje kapsamlı browser yetkisi tanımlı değil")
+    if ctx.browser_session_recover is not None:
+        recovery = ctx.browser_session_recover()
+        if recovery.get("failed", 0) or recovery.get("pending", 0):
+            raise BrowserError("İptal edilmiş browser sekmeleri kapatılamadı; browser kullanımı durduruldu")
     return ctx.browser_session_authorize(url)
 
 
@@ -406,6 +413,16 @@ def _browser_create_tab(params: dict, ctx: ToolContext) -> ToolResult:
     ctx.browser_session_key = grant["session_key"]
     tab_id = value["tabId"]
     ctx.browser_tabs.add(tab_id)
+    if ctx.browser_tab_registered is not None:
+        try:
+            ctx.browser_tab_registered(tab_id)
+        except Exception as exc:
+            try:
+                _browser_client(ctx).close_tab(user_id=grant["user_id"], tab_id=tab_id)
+                ctx.browser_tabs.discard(tab_id)
+            except Exception as close_exc:  # noqa: BLE001 - retain local cleanup ownership
+                log.warning("Browser tab kayıt hatası sonrası kapatılamadı (%s): %s", tab_id, close_exc)
+            raise BrowserError("Browser sekmesi Core üzerinde kalıcı kaydedilemedi") from exc
     return ToolResult(ok=True, output=f"Browser sekmesi oluşturuldu: {tab_id}", data=value)
 
 
@@ -688,3 +705,14 @@ def cleanup_browser_tabs(ctx: ToolContext) -> None:
             client.close_tab(user_id=ctx.browser_user_id, tab_id=tab_id)
         except Exception as exc:  # noqa: BLE001 — cleanup must not mask the run result
             log.warning("Browser sekmesi kapatılamadı (%s): %s", tab_id, exc)
+            if ctx.browser_tab_closed is not None:
+                try:
+                    ctx.browser_tab_closed(tab_id, type(exc).__name__)
+                except Exception:  # noqa: BLE001 - keep cleanup best-effort
+                    log.warning("Browser tab close hatası Core'a kaydedilemedi (%s)", tab_id)
+        else:
+            if ctx.browser_tab_closed is not None:
+                try:
+                    ctx.browser_tab_closed(tab_id, None)
+                except Exception:  # noqa: BLE001 - a later idempotent recovery may record closure
+                    log.warning("Browser tab kapanışı Core'a kaydedilemedi (%s)", tab_id)

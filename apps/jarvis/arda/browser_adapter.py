@@ -61,7 +61,8 @@ class CamofoxClient:
         if self.timeout <= 0 or self.timeout > 60:
             raise ValueError("Camofox timeout 0 ile 60 saniye arasında olmalı")
 
-    def _request(self, method: str, path: str, *, query: dict | None = None, body: dict | None = None):
+    def _request(self, method: str, path: str, *, query: dict | None = None, body: dict | None = None,
+                 allow_http_errors: tuple[int, ...] = ()):
         url = self.base_url.rstrip("/") + path
         if query:
             url += "?" + urlencode(query)
@@ -79,6 +80,10 @@ class CamofoxClient:
             raw = response.read()
             return getattr(response, "status", 200), raw, response.headers.get_content_type()
         except HTTPError as exc:
+            if exc.code in allow_http_errors:
+                content_type = exc.headers.get_content_type() if exc.headers else ""
+                exc.read(512)
+                return exc.code, b"", content_type
             detail = exc.read(512).decode("utf-8", "replace")
             raise BrowserError(f"Camofox HTTP {exc.code}: {detail[:240]}") from exc
         except (URLError, TimeoutError, OSError) as exc:
@@ -148,7 +153,12 @@ class CamofoxClient:
         return raw
 
     def close_tab(self, *, user_id: str, tab_id: str) -> None:
-        self._request("DELETE", f"/tabs/{quote(tab_id, safe='')}", query={"userId": user_id})
+        status, _raw, _content_type = self._request(
+            "DELETE", f"/tabs/{quote(tab_id, safe='')}", query={"userId": user_id},
+            allow_http_errors=(404,),
+        )
+        if status != 404 and not 200 <= status < 300:
+            raise BrowserError(f"Camofox tab close failed with HTTP {status}")
 
 
 def validate_public_url(url: str) -> str:

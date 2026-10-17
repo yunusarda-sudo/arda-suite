@@ -56,9 +56,12 @@ finally:
     db.close()
 ```
 
-Sonraki browser araç çağrıları reddedilir. Revocation, zaten açılmış browser sürecini
-kendiliğinden kapatmaz; bu yüzden unattended worker'da grant revocation olayını browser
-oturumunu kapatmaya bağlayan process supervisor ve egress firewall ayrıca gerekir.
+Sonraki browser araç çağrısı reddedilir. ARDA açtığı Camofox sekmelerini Core SQLite'ta
+grant'e bağlı olarak kaydeder; run sonunda kapatmayı dener. Grant iptal edildiyse veya
+süresi dolduysa sonraki browser aracı önce kalan sekmeleri kapatmayı dener. Camofox
+ulaşılamazsa browser kullanımı fail-closed kalır ve close kaydı sonraki çağrıda yeniden
+denenir. Bu, browser sürecini sonlandırmaz ve fiziksel egress izolasyonu sağlamaz; gerçek
+unattended kullanım için process supervisor ile OS/container egress firewall hâlâ gerekir.
 
 Domain allowlist'i uygulama katmanında ilk URL'yi doğrular ve navigasyon/snapshot sonunda
 gözlenen URL'yi tekrar denetler. Tarayıcı redirect'i yanıt alınmadan önce izlemiş olabilir;

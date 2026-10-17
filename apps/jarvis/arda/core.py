@@ -843,6 +843,28 @@ class Database:
                     (22, _iso(_utc_now())),
                 )
             migrations.append(22)
+        applied = {row[0] for row in self.conn.execute("SELECT version FROM schema_migrations")}
+        if 23 not in applied:
+            with self.transaction():
+                self.conn.execute(
+                    """CREATE TABLE browser_session_tabs (
+                        session_id TEXT NOT NULL REFERENCES browser_session_grants(session_id),
+                        tab_id TEXT NOT NULL,
+                        opened_at TEXT NOT NULL,
+                        closed_at TEXT,
+                        close_attempts INTEGER NOT NULL DEFAULT 0,
+                        last_close_error TEXT,
+                        PRIMARY KEY(session_id, tab_id)
+                    )"""
+                )
+                self.conn.execute(
+                    "CREATE INDEX browser_session_open_tabs_idx ON browser_session_tabs(session_id, closed_at)"
+                )
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (23, _iso(_utc_now())),
+                )
+            migrations.append(23)
         return migrations
 
 
