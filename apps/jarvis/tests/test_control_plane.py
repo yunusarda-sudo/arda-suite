@@ -92,6 +92,42 @@ def test_control_center_enqueues_execution_contract_and_exposes_job(tmp_path):
         thread.join(timeout=2)
 
 
+def test_control_center_cancels_queued_jobs_and_requests_cooperative_running_cancel(tmp_path):
+    db_path = tmp_path / "core.sqlite3"
+    db = bootstrap_runtime_database(db_path)
+    queue = JobQueue(db)
+    running = queue.enqueue("test", "cooperative cancel", idempotency_key="cancel-api-running")
+    lease = queue.claim("fixture-worker")
+    queue.start(lease.id, lease.lease_token)
+    assert lease.id == running.id
+    queued = queue.enqueue("test", "cancel before claim", idempotency_key="cancel-api-queued")
+    db.close()
+    plane = ControlPlane(db_path, evidence_root=tmp_path)
+
+    class Handler(ControlCenterHandler):
+        pass
+    Handler.plane = plane
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        for job_id in (queued.id, running.id):
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/api/jobs/{job_id}/cancel",
+                data=b"{}", headers={"Content-Type": "application/json"}, method="POST",
+            )
+            with urllib.request.urlopen(request) as response:
+                result = json.load(response)
+            assert result["cancel_requested_at"]
+        jobs = {item["id"]: item for item in plane.jobs()}
+        assert jobs[queued.id]["status"] == "cancelled"
+        assert jobs[running.id]["status"] == "running"
+        assert jobs[running.id]["cancel_requested_at"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+
+
 def test_control_center_exposes_organization_snapshot_and_next_task(tmp_path):
     db_path = tmp_path / "core.sqlite3"
     db = bootstrap_runtime_database(db_path)

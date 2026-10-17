@@ -36,7 +36,9 @@ WP-3 will build on these components. It must not claim that application URL vali
 - **Worker runtime boundary:** job claim is filtered by declared worker capabilities and long-running research renews its lease with a fail-closed guard. `WorkerRuntime` remains a deterministic host subprocess test harness; it is not approved as the coding worker and must not receive untrusted source execution.
 - Current code does not yet provide a Playwright coding/browser worker, revocation-to-browser-process kill path, or recoverable coding candidate handoff. Those remain blockers to calling WP-3 complete.
 - Worker protocol receipts and Core mutations now commit atomically in SQLite. A crash before commit rolls back both; a post-commit lost response is served from the durable receipt. This is covered by a simulated failure immediately after claim dispatch, not by killing/restarting a live worker service.
-- The durable `JobQueue.request_cancel` API is currently a Core/controller call, not exposed as a remote operator endpoint. The higher-level Control Center/API remains to wire this action with user authentication and authorization.
+- The Control Center now exposes an authorized `POST /api/jobs/{id}/cancel` action and a per-job cancel button. Queued jobs cancel immediately; leased/running jobs retain their lease and receive cancellation at heartbeat until the owner acknowledges. The caller is recorded as the shared `control-center-operator` role; the current shared-token auth model does not provide per-operator identity.
+- Current local cancellation test evidence: Control Center plus worker protocol tests **19 passed**; `make compile` and `git diff --check` passed. This does not prove cancellation over a deployed remote/Tailscale endpoint.
+- Current broad Jarvis regression subset: **1314 passed, 1 deselected**. It excludes the two Hermes baseline tests importing absent scripts, `test_brain.py` requiring ignored local config, and the known unrelated memory identity expectation. The unfiltered suite's checkout-level collection failure was observed on WP-2's sibling branch; it must be rerun against the integrated release branch.
 
 ## Rollback
 
