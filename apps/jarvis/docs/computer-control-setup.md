@@ -73,10 +73,35 @@ Bu repo yerel HTTP test doubles ile istemci sözleşmesini doğrular; canlı Cam
 Domain allowlist'i uygulama katmanında ilk URL'yi doğrular ve navigasyon/snapshot sonunda
 gözlenen URL'yi tekrar denetler. Tarayıcı redirect'i yanıt alınmadan önce izlemiş olabilir;
 bu nedenle bu kontrol egress sandbox'ı değildir. Dış sitelerle unattended kullanım için
-Camofox worker'ının kendisi redirect/DNS-rebinding dahil network egress ACL'li izole bir
-host/container içinde çalışmalı. Camofox proxy profili yalnızca trafik rotasını seçer; tek
-başına grant'in domain ACL'sini zorlamaz. Bu repo kodu fiziksel ağ izolasyonunu kurmuş veya
-doğrulamış sayılmaz.
+Camofox oturumu `browser.egress_proxy_host/port` ile oluşturulur. Üretimde Camofox API'si
+oturum başına `proxy` alanını destekleyen `redf0x1/camofox-browser` sürümüne sabitlenmelidir;
+upstream `jo-inc/camofox-browser` global proxy ayarını kullanır ve session-level sözleşme
+kanıtlanmış değildir. Proxy kimliği Core grant `user_id` + `session_id` ile bağlanır. Proxy
+her HTTP/CONNECT isteğinde grant'in hâlâ aktif olduğunu, süresini, domain kapsamını ve public
+DNS sonucunu doğrular; CONNECT tünelini grant iptalinde kapatır. İstekler yalnız public IP'lere
+pinlenir; private, link-local ve metadata hedefleri ile DNS rebinding reddedilir.
+
+Host'ta policy proxy'yi başlatmak için:
+
+```sh
+cd apps/jarvis
+.venv/bin/python -m arda.browser_egress --bind 127.0.0.1 --port 3129
+```
+
+Komut varsayılan olarak `ARDA_CORE_DB` değerini, yoksa `~/.arda/core.sqlite3` yolunu kullanır;
+farklı DB için `--db /path/to/core.sqlite3` ver. Camofox aynı hosttaysa `127.0.0.1` kullan.
+Rootless Podman içindeki Camofox'ta `egress_proxy_host` için host gateway adresini, proxy
+`--bind` için yalnız Podman bridge arayüzünün host adresini kullan; `0.0.0.0` bind etme.
+Camofox ayrıca yalnız ARDA egress proxy'ye erişebildiği internal network'te çalışmalıdır.
+Bu listener ve izolasyonu Podman network ve host firewall ile kurmadan browser'ı unattended
+kullanma.
+
+Proxy portunu Core DB'siyle aynı hostta tut. Camofox REST API'si yalnız trusted internal
+network'te ve API key ile erişilebilir olmalıdır. Bu repo yerel testlerde DNS pinleme, private
+IP reddi, domain kapsamı, proxy auth, HTTP header temizliği, Camofox'a session proxy aktarımı ve
+grant iptalinde tunnel kapanmasını doğrular; fiziksel Raspberry Pi/Podman ağı veya canlı
+Camofox session-level proxy uyumluluğu henüz doğrulanmadı. WP-3 kabulü için bu kanıtlar hâlâ
+gereklidir.
 
 ## macOS izinleri (UI otomasyonu için ŞART)
 

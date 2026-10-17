@@ -407,7 +407,7 @@ def _browser_create_tab(params: dict, ctx: ToolContext) -> ToolResult:
     grant = _browser_grant(ctx, url)
     value = _browser_client(ctx).create_tab(
         user_id=grant["user_id"], session_key=grant["session_key"], url=url,
-        allowed_domains=grant["allowed_domains"],
+        allowed_domains=grant["allowed_domains"], grant_token=grant["session_id"],
     )
     ctx.browser_user_id = grant["user_id"]
     ctx.browser_session_key = grant["session_key"]

@@ -123,6 +123,9 @@ browser:                 # Camofox adapter; project session grant is required fo
   timeout_seconds: 15
   project_id: ""        # Core'da yetkilendirilen proje ile birebir aynı olmalı
   session_id: ""        # BrowserSessionRegistry ile verilen süreli grant; yoksa browser actions fail-closed
+  egress_proxy_host: 127.0.0.1  # Camofox'tan erişilebilir adres; container için host.containers.internal kullan
+  egress_proxy_port: 3129
+  require_egress_proxy: true    # Proxy yoksa browser session oluşturma fail-closed olur
 
 memory:                   # Ortak kalıcı hafıza (Claude Code ile aynı yerel mem0 deposu)
   enabled: false

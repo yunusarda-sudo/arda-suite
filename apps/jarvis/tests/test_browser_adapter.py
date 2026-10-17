@@ -56,6 +56,25 @@ def test_client_uses_camofox_contract_and_bearer_auth():
     assert json.loads(request.data) == {"userId": "jarvis", "sessionKey": "run-1"}
 
 
+def test_client_attaches_grant_scoped_egress_proxy_to_camofox_session():
+    client, calls = _client([_Response(b'{"tabId":"t1","url":"about:blank"}')])
+    client.egress_proxy_host = "host.containers.internal"
+    client.create_tab(
+        user_id="arda-grant-a1b2", session_key="run-1", grant_token="bs_secret",
+        allowed_domains=("example.com",),
+    )
+    body = json.loads(calls[0][0].data)
+    assert body["proxy"] == {
+        "host": "host.containers.internal", "port": 3129,
+        "username": "arda-grant-a1b2", "password": "bs_secret",
+    }
+
+
+def test_required_egress_proxy_fails_closed_when_not_configured():
+    with pytest.raises(ValueError, match="egress proxy gerekli"):
+        CamofoxClient(require_egress_proxy=True)
+
+
 def test_private_and_non_http_destinations_are_rejected():
     for url in ("file:///tmp/x", "http://localhost:3000", "http://127.0.0.1:80", "http://169.254.169.254/latest"):
         with pytest.raises(BrowserError):

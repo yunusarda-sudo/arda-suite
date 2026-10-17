@@ -227,6 +227,9 @@ def _build_run_agent(cfg: dict, controls: Controls):
         base_url=str(browser_cfg.get("base_url", "http://localhost:9377")),
         api_key=os.environ.get("CAMOFOX_API_KEY", ""),
         timeout=float(browser_cfg.get("timeout_seconds", 15)),
+        egress_proxy_host=str(browser_cfg.get("egress_proxy_host", "")),
+        egress_proxy_port=int(browser_cfg.get("egress_proxy_port", 3129)),
+        require_egress_proxy=bool(browser_cfg.get("require_egress_proxy", False)),
     )
 
     def browser_recover():
