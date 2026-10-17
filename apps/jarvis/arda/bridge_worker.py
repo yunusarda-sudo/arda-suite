@@ -8,7 +8,8 @@ from __future__ import annotations
 import argparse
 import importlib
 import os
-import time
+import signal
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -27,8 +28,11 @@ def load_factory(spec: str) -> Any:
 
 
 def watch(bridge: ExecutionBridge, *, poll_seconds: float = 2.0,
-          autopilot_projects: tuple[str, ...] = ()) -> None:
-    while True:
+          autopilot_projects: tuple[str, ...] = (),
+          stop_event: threading.Event | None = None) -> None:
+    if stop_event is None:
+        stop_event = threading.Event()
+    while not stop_event.is_set():
         plane = ControlPlane(bridge.db_path)
         projects = autopilot_projects
         if not projects:
@@ -39,14 +43,18 @@ def watch(bridge: ExecutionBridge, *, poll_seconds: float = 2.0,
                 db.close()
         if projects:
             for project_id in projects:
+                if stop_event.is_set():
+                    break
                 try:
                     plane.dispatch_next_task(project_id)
                 except Exception:
                     # Dispatch failures are durable gate outcomes; the worker
                     # must keep servicing already queued jobs.
                     continue
+        if stop_event.is_set():
+            break
         bridge.run_once()
-        time.sleep(poll_seconds)
+        stop_event.wait(poll_seconds)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -61,8 +69,21 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("ARDA_BRIDGE_EXECUTOR_FACTORY is required; refusing to run without an executor")
     executor = load_factory(args.executor_factory)
     projects = tuple(args.autopilot_project or filter(None, os.environ.get("ARDA_AUTOPILOT_PROJECTS", "").split(",")))
-    watch(ExecutionBridge(args.db, executor, worker_id=args.worker_id),
-          poll_seconds=args.poll_seconds, autopilot_projects=projects)
+    stop_event = threading.Event()
+    previous_handlers = {}
+
+    def request_stop(_signum, _frame):
+        stop_event.set()
+
+    try:
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            previous_handlers[signum] = signal.signal(signum, request_stop)
+        watch(ExecutionBridge(args.db, executor, worker_id=args.worker_id),
+              poll_seconds=args.poll_seconds, autopilot_projects=projects,
+              stop_event=stop_event)
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
     return 0
 
 
