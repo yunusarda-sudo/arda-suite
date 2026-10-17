@@ -147,7 +147,19 @@ class GitHubProjectObserver:
             list_runs = getattr(self.adapter, "list_workflow_runs", None)
             if callable(list_runs):
                 runs = list_runs(repo, per_page=self.per_endpoint_limit)
+                latest_by_workflow: dict[tuple[str, str], dict[str, Any]] = {}
                 for run in runs:
+                    branch = str(run.get("head_branch", ""))
+                    workflow = str(run.get("name", ""))
+                    key = (branch, workflow)
+                    current = latest_by_workflow.get(key)
+                    rank = (str(run.get("updated_at", "")), int(run.get("id") or 0),
+                            int(run.get("run_attempt") or 1))
+                    current_rank = ((str(current.get("updated_at", "")), int(current.get("id") or 0),
+                                     int(current.get("run_attempt") or 1)) if current else None)
+                    if current_rank is None or rank > current_rank:
+                        latest_by_workflow[key] = run
+                for run in latest_by_workflow.values():
                     if (run.get("status") == "completed" and run.get("conclusion") in
                             {"failure", "timed_out", "action_required"} and run.get("id") is not None
                             and run.get("updated_at")):

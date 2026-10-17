@@ -43,7 +43,7 @@ def test_github_observer_emits_bounded_normalized_issue_pr_and_failure_signals()
 
         def list_workflow_runs(self, repo, *, per_page):
             return [{"id": 4, "status": "completed", "conclusion": "failure", "head_sha": "a" * 40,
-                     "run_attempt": 2, "updated_at": "2026-10-17T10:02:00Z"},
+                     "run_attempt": 2, "updated_at": "2026-10-17T10:03:00Z"},
                     {"id": 5, "status": "completed", "conclusion": "success", "updated_at": "2026-10-17T10:02:00Z"}]
 
     db = bootstrap_runtime_database(":memory:")
@@ -53,6 +53,50 @@ def test_github_observer_emits_bounded_normalized_issue_pr_and_failure_signals()
         assert [signal.signal_type for signal in signals] == ["issue.open", "pull_request.open", "ci.failure"]
         assert signals[-1].source_key == "workflow:4:attempt:2"
         assert "body" not in signals[0].payload
+    finally:
+        db.close()
+
+
+def test_director_ignores_ci_failure_superseded_by_newer_success():
+    now = datetime.now(timezone.utc)
+    run_data = [
+        {"id": 40, "status": "completed", "conclusion": "failure", "name": "Full CI",
+         "head_branch": "main", "head_sha": "a" * 40, "created_at": (now - timedelta(minutes=5)).isoformat(),
+         "updated_at": (now - timedelta(minutes=4)).isoformat()},
+        {"id": 41, "status": "completed", "conclusion": "success", "name": "Full CI",
+         "head_branch": "main", "head_sha": "b" * 40, "created_at": (now - timedelta(minutes=2)).isoformat(),
+         "updated_at": (now - timedelta(minutes=1)).isoformat()},
+    ]
+
+    class Adapter:
+        def list_issues(self, _repo, *, state):
+            return []
+
+        def list_pull_requests(self, _repo, *, state):
+            return []
+
+        def list_workflow_runs(self, _repo, *, per_page):
+            return list(run_data)
+
+    db = bootstrap_runtime_database(":memory:")
+    try:
+        mission = create_mission(db)
+        director = AutonomousDirector(
+            db, GitHubProjectObserver(Adapter()), CiFailureProposalGenerator(),
+        )
+        recovered = director.run_once(mission["id"])
+        assert recovered["observed"] == 0
+        assert recovered["proposed"] == 0
+        assert db.scalar("SELECT COUNT(*) FROM director_signals") == 0
+        assert db.scalar("SELECT COUNT(*) FROM director_proposals") == 0
+
+        run_data.append({"id": 42, "status": "completed", "conclusion": "failure", "name": "Full CI",
+                         "head_branch": "main", "head_sha": "c" * 40,
+                         "created_at": now.isoformat(), "updated_at": (now + timedelta(seconds=1)).isoformat()})
+        current_failure = director.run_once(mission["id"])
+        assert current_failure["observed"] == 1
+        assert current_failure["proposed"] == 1
+        assert db.scalar("SELECT COUNT(*) FROM director_proposals") == 1
     finally:
         db.close()
 
