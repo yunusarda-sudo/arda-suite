@@ -316,11 +316,8 @@ class TestCompactionTools(unittest.TestCase):
 class TestIDEBridgeTools(unittest.TestCase):
 
     @patch("ide_bridge.evaluate_health_score")
-    @patch("mcp_server._mem")
-    def test_get_memory_health_tool(self, mock_mem, mock_eval):
-        mock_client = MagicMock()
-        mock_client.get_all.return_value = []
-        mock_mem.return_value = mock_client
+    @patch("mcp_server.read_inventory", return_value=[])
+    def test_get_memory_health_tool(self, mock_inventory, mock_eval):
         mock_eval.return_value = {
             "scope": "test_proj",
             "score": 95,
@@ -340,6 +337,8 @@ class TestIDEBridgeTools(unittest.TestCase):
         output = ms.get_memory_health(scope="test_proj")
         self.assertIn("Memory Health Score: 95/100 [EXCELLENT]", output)
         self.assertIn("Keep memories updated", output)
+        mock_inventory.assert_called_once()
+        self.assertEqual(mock_inventory.call_args.kwargs["scope"], "test_proj")
 
     @patch("ide_bridge.sync_cursor_rules")
     @patch("ide_bridge.generate_mcp_config")

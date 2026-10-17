@@ -1,4 +1,5 @@
 import json
+import shutil
 import sqlite3
 
 import pytest
@@ -78,3 +79,21 @@ def test_backup_rejects_symlink_artifacts(tmp_path):
     (artifact_root / "linked.txt").symlink_to(outside)
     with pytest.raises(RecoveryError, match="refusing special file or symlink"):
         create_backup(database, {"harness": artifact_root}, tmp_path / "backup", writers_stopped=True)
+
+
+def test_backup_verification_does_not_follow_manifest_parent_symlink(tmp_path):
+    database = tmp_path / "live.sqlite3"
+    _database(database)
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    (artifact_root / "evidence.json").write_text("{}", encoding="utf-8")
+    backup = tmp_path / "backup"
+    create_backup(database, {"harness": artifact_root}, backup, writers_stopped=True)
+
+    external = tmp_path / "outside"
+    external.mkdir()
+    (external / "evidence.json").write_text("outside data", encoding="utf-8")
+    shutil.rmtree(backup / "artifacts" / "harness")
+    (backup / "artifacts" / "harness").symlink_to(external, target_is_directory=True)
+    with pytest.raises(RecoveryError, match="traverses symlink"):
+        verify_backup(backup)

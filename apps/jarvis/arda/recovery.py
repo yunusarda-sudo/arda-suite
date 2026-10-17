@@ -54,6 +54,19 @@ def _safe_regular_file(path: Path) -> os.stat_result:
     return info
 
 
+def _safe_file_under(root: Path, relative: PurePosixPath) -> Path:
+    """Resolve a manifest path without following any symlink component."""
+    current = root
+    for part in relative.parts[:-1]:
+        current = current / part
+        info = current.lstat()
+        if not stat.S_ISDIR(info.st_mode):
+            raise RecoveryError(f"manifest path traverses symlink or non-directory: {current}")
+    result = current / relative.parts[-1]
+    _safe_regular_file(result)
+    return result
+
+
 def _checked_roots(roots: dict[str, str | Path], output: Path) -> list[tuple[str, Path]]:
     checked: list[tuple[str, Path]] = []
     for label, value in sorted(roots.items()):
@@ -198,8 +211,7 @@ def verify_backup(backup: str | Path) -> dict[str, Any]:
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) \
                 or not isinstance(mode, int) or mode < 0 or mode > 0o777:
             raise RecoveryError(f"invalid hash or mode for {name}")
-        file_path = root.joinpath(*rel.parts)
-        _safe_regular_file(file_path)
+        file_path = _safe_file_under(root, rel)
         if _sha256(file_path) != digest:
             raise RecoveryError(f"hash mismatch: {name}")
         expected.add(name)
