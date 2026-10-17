@@ -1,6 +1,6 @@
 # WP-2: Autonomous Director and mission lifecycle
 
-Status: **IN PROGRESS — implementation and local integration tests underway**
+Status: **LOCAL DIRECTOR AND CORE QUEUE INTEGRATION IMPLEMENTED; LIVE EXECUTION/Pi ACCEPTANCE OPEN**
 
 This is the durable implementation plan for WP-2 of the user-provided ARDA Autonomous OS work packages. WP-2 is developed on a branch separate from draft PR #7. It may use test doubles while WP-1's physical security and recovery gate is blocked; real unattended coding stays disabled until that gate passes.
 
@@ -30,7 +30,7 @@ The Director proposes. Core remains the authority for mission scope, risk, budge
 - [x] Add authenticated Control Center API routes for mission create/list/read/pause, proposal review, and one-shot Director execution.
 - [x] Wire a deterministic failing-CI proposer and an opt-in long-running, durable scheduler service; keep unattended execution closed.
 - [ ] Evaluate a real read-only GitHub source and real-worker end-to-end flow without enabling unattended execution.
-- [ ] Complete full regression review, document setup and rollback, and create one integrated draft PR.
+- [ ] Complete a clean full regression run, document setup and rollback, and create one integrated draft PR.
 
 ## Acceptance and evidence
 
@@ -61,19 +61,20 @@ Local service opt-in is not a Pi deployment or unattended coding authorization. 
 
 ## Current known gaps
 
-- Existing `GitHubSyncService` stores aggregate open-PR and failed-CI metrics; it does not retain actionable issue/CI signal versions or create proposals.
-- `ControlPlane.dispatch_next_task()` selects pre-created ready tasks only.
-- Mission state is a free-text project profile with broad policy/budget JSON; there is no dedicated expiring, scoped mission record or proposal ledger.
-- The current executor may be configured but must not run new self-discovered work against real repositories until WP-1's physical security/recovery gate passes.
-- The current branch has local implementation changes, but no PR is created and no physical Pi or live GitHub credential test has run.
-- The Control Plane only starts Director polling when `ARDA_DIRECTOR_ENABLED=1`; it uses optional `ARDA_GITHUB_TOKEN`/`GITHUB_TOKEN` for read-only GitHub requests. Execution dispatch is intentionally not wired into the service.
-- The work loop test uses the real SQLite `ExecutionBridge`/Core queue and a fake observer/proposer; it is not evidence of Hermes sandbox or physical Pi execution.
+- GitHub issue/PR/CI signal versioning, scoped missions, and durable proposals are implemented. Live observation remains read-only.
+- `CoreProposalDispatcher` and the deterministic integration test create one idempotent Core job and reconcile only after a verified artifact. The Control Plane scheduler intentionally does not wire that dispatcher while WP-1's physical security/recovery gate is open; accepted proposals remain pending dispatch.
+- The work loop/dispatcher fixture uses real SQLite/Core queues and a fake observer/proposer/worker. It is not evidence of a live Hermes sandbox run.
+- `ARDA_DIRECTOR_ENABLED=1` starts read-only observation and proposal generation. No service setting enables execution in this branch, and unattended coding must remain disabled until WP-1 physical acceptance is demonstrated.
+- Current public GitHub probe (`pallets/flask`, latest three runs) returned three completed successful runs, so this live sample generated no CI failure proposal. It proves the GET adapter can read a public repository, not proposal quality or worker execution.
+- Current full read-only Director probe against `pallets/flask` fetched and persisted 8 normalized issue/PR/workflow signals in a temporary SQLite database. It produced 0 proposals and 0 jobs because the observed sample had no qualifying fresh CI failure; no GitHub writes or worker execution occurred.
+- PR #8 remains an open draft with no reported CI checks. Physical Pi, live Hermes, worker restart, and unattended dispatch remain `NOT_RUN`.
 
 ## Evidence from this implementation pass
 
-- Focused integration command covers Director, organization registry, GitHub adapter, Control Center, scheduler, Core migrations, diagnostics, explorer, and capability migration expectations: **77 passed**. `compileall` and `git diff --check` passed.
-- Broad regression, excluding the four known-blocked files listed below: **1,251 passed**.
+- Focused current integration command: `./.venv/bin/python -m pytest -o addopts='' -q tests/test_autonomous_director.py tests/test_control_plane.py tests/test_scheduler.py tests/test_organization.py tests/test_execution_bridge.py`: **37 passed**. `make compile` and `git diff --check` passed.
+- Current broad run excluding two test modules that import absent Hermes scripts and local-only `test_brain.py`: **1,269 passed, 1 failed**. The failure is the known unrelated memory identity expectation (`default` vs `example-user`); it is not changed here.
+- Current unfiltered `make test` is `BLOCKED` at collection by `ModuleNotFoundError` for `scripts.run_hermes_baseline_batch` and `scripts.capture_hermes_baseline`, absent from this checkout.
 - A live unauthenticated read-only scan of public `pallets/flask` successfully fetched issues, PRs, and workflow runs and persisted four normalized signals to a temporary Core database. The latest bounded sample contained no qualifying fresh CI failure, so it correctly generated no proposal and dispatched nothing.
 - A separate deterministic integration test supplied a fresh failing-CI observation and verified exactly one proposal/job through the real SQLite Core queue across a simulated crash/replay, then reconciled success only after Core recorded a verified artifact.
-- The full repository suite remains blocked by checkout/environment issues: two Hermes baseline test modules import script files absent from this checkout; five `test_brain.py` cases require local `config.local.yaml`/vault configuration; and an unrelated memory identity assertion fails (`default` vs `example-user`). A broad run excluding those four test files passed. No fix was made to those unrelated conditions.
+- A clean full regression run remains open due to the absent Hermes baseline scripts, local-only brain configuration, and unrelated memory identity assertion. No fix was made to unrelated conditions.
 - Physical Pi, real Hermes worker, and unattended dispatch are `NOT_RUN`; the service does not wire a dispatcher and WP-1 physical acceptance remains outstanding.
