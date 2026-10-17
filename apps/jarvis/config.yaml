@@ -126,6 +126,7 @@ browser:                 # Camofox adapter; project session grant is required fo
   egress_proxy_host: 127.0.0.1  # Camofox'tan erişilebilir adres; container için host.containers.internal kullan
   egress_proxy_port: 3129
   require_egress_proxy: true    # Proxy yoksa browser session oluşturma fail-closed olur
+  required_camofox_version: "2.4.8"  # Session proxy desteği için exact health.version kontrolü
 
 memory:                   # Ortak kalıcı hafıza (Claude Code ile aynı yerel mem0 deposu)
   enabled: false

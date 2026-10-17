@@ -56,6 +56,7 @@ class CamofoxClient:
     egress_proxy_host: str = ""
     egress_proxy_port: int = 3129
     require_egress_proxy: bool = False
+    required_camofox_version: str = "2.4.8"
 
     def __post_init__(self) -> None:
         parsed = urlparse(self.base_url.rstrip("/"))
@@ -66,9 +67,12 @@ class CamofoxClient:
         if not 1 <= self.egress_proxy_port <= 65535:
             raise ValueError("Browser egress proxy port geçersiz")
         self.egress_proxy_host = self.egress_proxy_host.strip()
+        self.required_camofox_version = self.required_camofox_version.strip()
         if self.require_egress_proxy and not self.egress_proxy_host:
             # Fail at construction so a required boundary cannot degrade to direct egress.
             raise ValueError("Browser grant egress proxy gerekli ama host tanımlı değil")
+        if self.require_egress_proxy and not self.required_camofox_version:
+            raise ValueError("Browser grant egress için sabit Camofox sürümü gerekli")
 
     def _request(self, method: str, path: str, *, query: dict | None = None, body: dict | None = None,
                  allow_http_errors: tuple[int, ...] = ()):
@@ -113,6 +117,14 @@ class CamofoxClient:
     def health(self) -> dict:
         return self._json("GET", "/health")
 
+    def _assert_egress_proxy_api(self) -> None:
+        health = self.health()
+        if health.get("version") != self.required_camofox_version:
+            raise BrowserError(
+                "Camofox egress proxy API sürümü doğrulanamadı; "
+                f"beklenen {self.required_camofox_version}, alınan {health.get('version') or 'bilinmiyor'}"
+            )
+
     def create_tab(self, *, user_id: str, session_key: str, url: str | None = None,
                    allowed_domains: tuple[str, ...] | list[str] = (), grant_token: str = "") -> dict:
         body = {"userId": user_id, "sessionKey": session_key}
@@ -121,6 +133,8 @@ class CamofoxClient:
         if self.egress_proxy_host:
             if not user_id or not grant_token:
                 raise BrowserError("Grant egress proxy kimliği eksik")
+            if self.require_egress_proxy:
+                self._assert_egress_proxy_api()
             body["proxy"] = {
                 "host": self.egress_proxy_host,
                 "port": self.egress_proxy_port,

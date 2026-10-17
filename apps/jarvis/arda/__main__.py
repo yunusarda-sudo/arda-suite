@@ -230,6 +230,7 @@ def _build_run_agent(cfg: dict, controls: Controls):
         egress_proxy_host=str(browser_cfg.get("egress_proxy_host", "")),
         egress_proxy_port=int(browser_cfg.get("egress_proxy_port", 3129)),
         require_egress_proxy=bool(browser_cfg.get("require_egress_proxy", False)),
+        required_camofox_version=str(browser_cfg.get("required_camofox_version", "2.4.8")),
     )
 
     def browser_recover():

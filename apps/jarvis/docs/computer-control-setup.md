@@ -73,10 +73,10 @@ Bu repo yerel HTTP test doubles ile istemci sözleşmesini doğrular; canlı Cam
 Domain allowlist'i uygulama katmanında ilk URL'yi doğrular ve navigasyon/snapshot sonunda
 gözlenen URL'yi tekrar denetler. Tarayıcı redirect'i yanıt alınmadan önce izlemiş olabilir;
 bu nedenle bu kontrol egress sandbox'ı değildir. Dış sitelerle unattended kullanım için
-Camofox oturumu `browser.egress_proxy_host/port` ile oluşturulur. Üretimde Camofox API'si
-oturum başına `proxy` alanını destekleyen `redf0x1/camofox-browser` sürümüne sabitlenmelidir;
-upstream `jo-inc/camofox-browser` global proxy ayarını kullanır ve session-level sözleşme
-kanıtlanmış değildir. Proxy kimliği Core grant `user_id` + `session_id` ile bağlanır. Proxy
+Camofox oturumu `browser.egress_proxy_host/port` ile oluşturulur. Camofox sürümü v2.4.8'e
+sabitlenir ve her tab açılışından önce `/health` yanıtındaki `version` alanı kontrol edilir;
+uyumsuz veya sürüm bildirmeyen servis fail-closed reddedilir. Session-level `proxy` alanı
+redf0x1 Camofox v2.4.8 API sözleşmesidir. Proxy kimliği Core grant `user_id` + `session_id` ile bağlanır. Proxy
 her HTTP/CONNECT isteğinde grant'in hâlâ aktif olduğunu, süresini, domain kapsamını ve public
 DNS sonucunu doğrular; CONNECT tünelini grant iptalinde kapatır. İstekler yalnız public IP'lere
 pinlenir; private, link-local ve metadata hedefleri ile DNS rebinding reddedilir.
@@ -90,8 +90,13 @@ cd apps/jarvis
 
 Komut varsayılan olarak `ARDA_CORE_DB` değerini, yoksa `~/.arda/core.sqlite3` yolunu kullanır;
 farklı DB için `--db /path/to/core.sqlite3` ver. Camofox aynı hosttaysa `127.0.0.1` kullan.
-Rootless Podman içindeki Camofox'ta `egress_proxy_host` için host gateway adresini, proxy
-`--bind` için yalnız Podman bridge arayüzünün host adresini kullan; `0.0.0.0` bind etme.
+Pi üzerinde `ghcr.io/redf0x1/camofox-browser:2.4.8` yayımlanmış imajı bu kontrolde yalnız
+`linux/amd64` olarak raporlandı; Raspberry Pi 5 için onu çalıştırma. v2.4.8 kaynak kodunu
+(`9a6b81b152bb07f67ad2b886ee865a8ce72411b5`) Pi'de Podman ile yerel ARM64 imaja build et,
+`podman image inspect` ile mimariyi doğrula ve servisi başlatmadan önce `/health.version` değerinin
+`2.4.8` olduğunu gör. Rootless Podman içindeki Camofox'ta `egress_proxy_host` için host
+gateway adresini, proxy `--bind` için yalnız Podman bridge arayüzünün host adresini kullan;
+`0.0.0.0` bind etme.
 Camofox ayrıca yalnız ARDA egress proxy'ye erişebildiği internal network'te çalışmalıdır.
 Bu listener ve izolasyonu Podman network ve host firewall ile kurmadan browser'ı unattended
 kullanma.

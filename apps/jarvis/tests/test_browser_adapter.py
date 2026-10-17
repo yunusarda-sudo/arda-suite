@@ -75,6 +75,31 @@ def test_required_egress_proxy_fails_closed_when_not_configured():
         CamofoxClient(require_egress_proxy=True)
 
 
+def test_required_egress_proxy_checks_pinned_camofox_version_before_create():
+    client, calls = _client([
+        _Response(b'{"version":"2.4.8"}'),
+        _Response(b'{"tabId":"t1","url":"about:blank"}'),
+    ])
+    client.egress_proxy_host = "127.0.0.1"
+    client.require_egress_proxy = True
+    assert client.create_tab(
+        user_id="arda-grant-a1b2", session_key="run-1", grant_token="bs_secret"
+    )["tabId"] == "t1"
+    assert calls[0][0].full_url.endswith("/health")
+    assert calls[1][0].full_url.endswith("/tabs")
+
+
+def test_required_egress_proxy_rejects_unpinned_camofox_before_create():
+    client, calls = _client([_Response(b'{"version":"2.4.7"}')])
+    client.egress_proxy_host = "127.0.0.1"
+    client.require_egress_proxy = True
+    with pytest.raises(BrowserError, match="sürümü doğrulanamadı"):
+        client.create_tab(
+            user_id="arda-grant-a1b2", session_key="run-1", grant_token="bs_secret"
+        )
+    assert len(calls) == 1
+
+
 def test_private_and_non_http_destinations_are_rejected():
     for url in ("file:///tmp/x", "http://localhost:3000", "http://127.0.0.1:80", "http://169.254.169.254/latest"):
         with pytest.raises(BrowserError):
