@@ -253,28 +253,37 @@ class AutonomousDirector:
                 )
         ready_proposals = self.registry.ready_proposals(mission_id)
         blocked_dispatches = 0
-        max_active_jobs = int(mission_data["budget"].get("max_active_jobs", 1))
+        dispatch_errors = 0
         capacity_exhausted = False
+        mission_blocked = False
+        execution_scope_blocked = False
         if self.dispatcher is not None:
             for proposal in ready_proposals:
-                active_jobs = self.db.execute(
-                    """SELECT COUNT(*) FROM director_proposals p JOIN jobs j ON j.id=p.job_id
-                       WHERE p.mission_id=? AND p.status='queued'
-                         AND j.status IN ('queued','leased','running')""",
-                    (mission_id,),
-                ).fetchone()[0]
-                if active_jobs >= max_active_jobs:
+                reservation = self.registry.reserve_proposal_dispatch(proposal["id"])
+                if reservation == "capacity_exhausted":
                     capacity_exhausted = True
                     break
+                if reservation == "mission_inactive":
+                    mission_blocked = True
+                    break
+                if reservation == "scope_not_delegated":
+                    execution_scope_blocked = True
+                    break
+                if reservation == "signal_stale":
+                    continue
+                if reservation != "reserved":
+                    continue
                 try:
                     handoff = self.dispatcher(mission_data, dict(proposal))
                     if handoff is None:
+                        self.registry.release_proposal_dispatch(proposal["id"])
                         blocked_dispatches += 1
                         continue
                     self.registry.mark_proposal_queued(
                         proposal["id"], task_id=handoff["task_id"], job_id=handoff["job_id"])
                     dispatched += 1
                 except Exception as exc:
+                    dispatch_errors += 1
                     self.events.append("director.dispatch_failed", project_id=mission["project_id"],
                                        source="director", source_id=proposal["id"],
                                        payload={"error_class": type(exc).__name__})
@@ -282,8 +291,14 @@ class AutonomousDirector:
             "SELECT COUNT(*) FROM director_proposals WHERE mission_id=? AND status='accepted'",
             (mission_id,),
         ).fetchone()[0]
-        gate_closed = awaiting_dispatch > 0 and (self.dispatcher is None or blocked_dispatches > 0)
-        reason = ("WP1_EXECUTION_GATE_CLOSED" if gate_closed and "coding.execute" in mission_data["delegated_scopes"]
+        gate_closed = awaiting_dispatch > 0 and (
+            self.dispatcher is None or blocked_dispatches > 0 or dispatch_errors > 0
+            or mission_blocked or execution_scope_blocked
+        )
+        reason = ("DIRECTOR_DISPATCH_FAILED" if dispatch_errors
+                  else "MISSION_NOT_ACTIVE" if mission_blocked
+                  else "MISSION_EXECUTION_SCOPE_NOT_DELEGATED" if execution_scope_blocked
+                  else "WP1_EXECUTION_GATE_CLOSED" if gate_closed and "coding.execute" in mission_data["delegated_scopes"]
                   else "MISSION_EXECUTION_SCOPE_NOT_DELEGATED" if gate_closed
                   else "MISSION_ACTIVE_JOB_BUDGET_EXHAUSTED" if awaiting_dispatch and capacity_exhausted
                   else "SIGNALS_PROCESSED" if observed else "IDLE_NO_SIGNALS")

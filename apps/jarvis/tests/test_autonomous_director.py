@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import hashlib
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 from arda.autonomous_director import (
@@ -218,6 +220,129 @@ def test_dispatch_respects_mission_active_job_budget_and_resumes_waiting_proposa
     assert db.scalar("SELECT COUNT(*) FROM jobs") == 2
     assert db.scalar("SELECT COUNT(*) FROM director_proposals WHERE status='queued'") == 1
     assert db.scalar("SELECT COUNT(*) FROM director_proposals WHERE status='verified'") == 1
+    db.close()
+
+
+def test_dispatch_reservation_is_atomic_and_recovers_after_restart(tmp_path):
+    db_path = tmp_path / "core.sqlite3"
+    db = bootstrap_runtime_database(db_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)
+    (repo / "README.md").write_text("baseline\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "baseline"], check=True)
+    baseline = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    mission = create_mission(db)
+    now = datetime.now(timezone.utc).isoformat()
+    observations = [
+        SignalObservation("github", f"workflow:{run_id}:attempt:1", "ci.failure", now,
+                          {"repo": "acme/opvia", "run_id": run_id, "conclusion": "failure"})
+        for run_id in (201, 202)
+    ]
+
+    class Observer:
+        def observe(self, _mission):
+            return observations
+
+    class Proposer:
+        def propose(self, _mission, signal):
+            run_id = signal["payload"]["run_id"]
+            return {"repo": "acme/opvia", "objective": f"Repair CI run {run_id}",
+                    "acceptance": ["Configured checks pass"], "allowed_paths": ["src/**"],
+                    "risk": "low", "estimated_cost": 1, "priority": "high",
+                    "rationale": f"Fresh failing workflow run {run_id}.",
+                    "value_score": 90, "feasibility_score": 85}
+
+    # Persist two accepted proposals without dispatching, as can happen before
+    # the worker is enabled or after an operator review.
+    assert AutonomousDirector(db, Observer(), Proposer()).run_once(mission["id"])["awaiting_dispatch"] == 2
+    proposal_ids = [row[0] for row in db.execute(
+        "SELECT id FROM director_proposals WHERE mission_id=? AND status='accepted' ORDER BY id",
+        (mission["id"],),
+    )]
+    barrier = threading.Barrier(2)
+
+    def reserve(proposal_id):
+        connection = bootstrap_runtime_database(db_path)
+        try:
+            barrier.wait(timeout=5)
+            return OrganizationRegistry(connection).reserve_proposal_dispatch(proposal_id)
+        finally:
+            connection.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(reserve, proposal_ids))
+    assert sorted(results) == ["capacity_exhausted", "reserved"]
+    db.close()
+    db = bootstrap_runtime_database(db_path)
+    reserved_id = db.execute(
+        "SELECT proposal_id FROM director_dispatch_reservations WHERE mission_id=?",
+        (mission["id"],),
+    ).fetchone()[0]
+    assert OrganizationRegistry(db).ready_proposals(mission["id"])[0]["id"] == reserved_id
+
+    dispatcher = CoreProposalDispatcher(
+        ExecutionBridge(db_path, worker_id="director-reservation-recovery"),
+        lambda _repo: {"path": str(repo), "baseline_ref": "refs/heads/main", "baseline_sha": baseline},
+        execution_enabled=True,
+    )
+    recovered = AutonomousDirector(db, Observer(), Proposer(), dispatcher=dispatcher).run_once(mission["id"])
+    assert recovered["dispatched"] == 1
+    assert recovered["awaiting_dispatch"] == 1
+    assert db.scalar("SELECT COUNT(*) FROM jobs") == 1
+    assert db.scalar("SELECT COUNT(*) FROM director_dispatch_reservations") == 0
+    assert db.scalar("SELECT COUNT(*) FROM director_proposals WHERE status='queued'") == 1
+    assert db.scalar("SELECT COUNT(*) FROM director_proposals WHERE status='accepted'") == 1
+    db.close()
+
+
+def test_accepted_proposal_is_rejected_if_its_signal_goes_stale_before_dispatch(tmp_path):
+    db_path = tmp_path / "core.sqlite3"
+    db = bootstrap_runtime_database(db_path)
+    mission = create_mission(db)
+    now = datetime.now(timezone.utc).isoformat()
+    observation = SignalObservation("github", "workflow:303:attempt:1", "ci.failure", now,
+                                    {"repo": "acme/opvia", "run_id": 303, "conclusion": "failure"})
+
+    class Observer:
+        def observe(self, _mission):
+            return [observation]
+
+    class Proposer:
+        def propose(self, _mission, _signal):
+            return {"repo": "acme/opvia", "objective": "Repair CI run 303",
+                    "acceptance": ["Configured checks pass"], "allowed_paths": ["src/**"],
+                    "risk": "low", "estimated_cost": 1, "priority": "high",
+                    "rationale": "Fresh failing workflow run 303.",
+                    "value_score": 90, "feasibility_score": 85}
+
+    assert AutonomousDirector(db, Observer(), Proposer()).run_once(mission["id"])["awaiting_dispatch"] == 1
+    db.execute("UPDATE director_signals SET fresh_until=?", ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)
+    (repo / "README.md").write_text("baseline\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "baseline"], check=True)
+    baseline = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    dispatcher = CoreProposalDispatcher(
+        ExecutionBridge(db_path, worker_id="director-stale-signal"),
+        lambda _repo: {"path": str(repo), "baseline_ref": "refs/heads/main", "baseline_sha": baseline},
+        execution_enabled=True,
+    )
+
+    result = AutonomousDirector(db, Observer(), Proposer(), dispatcher=dispatcher).run_once(mission["id"])
+    proposal = db.execute("SELECT status, decision_json FROM director_proposals").fetchone()
+    assert result["dispatched"] == 0
+    assert result["awaiting_dispatch"] == 0
+    assert db.scalar("SELECT COUNT(*) FROM jobs") == 0
+    assert proposal["status"] == "rejected"
+    assert json.loads(proposal["decision_json"])["reason"] == "SIGNAL_STALE_AT_DISPATCH"
     db.close()
 
 

@@ -410,9 +410,96 @@ class OrganizationRegistry:
         if mission["status"] != "active":
             return []
         return self.db.execute(
-            "SELECT * FROM director_proposals WHERE mission_id=? AND status='accepted' "
-            "ORDER BY created_at, id LIMIT ?", (mission_id, limit),
+            """SELECT p.* FROM director_proposals p
+               LEFT JOIN director_dispatch_reservations r ON r.proposal_id=p.id
+               WHERE p.mission_id=? AND p.status='accepted'
+               ORDER BY CASE WHEN r.proposal_id IS NOT NULL THEN 0 ELSE 1 END, p.created_at, p.id
+               LIMIT ?""", (mission_id, limit),
         ).fetchall()
+
+    def reserve_proposal_dispatch(self, proposal_id: str) -> str:
+        """Atomically reserve one mission execution slot before idempotent enqueue."""
+        with self.db.transaction():
+            proposal = self.db.execute(
+                "SELECT * FROM director_proposals WHERE id=?", (proposal_id,)
+            ).fetchone()
+            if proposal is None:
+                raise KeyError(proposal_id)
+            mission = self.db.execute(
+                "SELECT * FROM organization_missions WHERE id=?", (proposal["mission_id"],)
+            ).fetchone()
+            if mission is None:
+                raise KeyError(proposal["mission_id"])
+            if (mission["status"] != "active"
+                    or datetime.fromisoformat(mission["expires_at"]) <= self.clock()):
+                return "mission_inactive"
+            if "coding.execute" not in json.loads(mission["delegated_scopes_json"]):
+                return "scope_not_delegated"
+            if proposal["status"] == "queued":
+                return "reserved"
+            if proposal["status"] != "accepted":
+                return "not_accepted"
+            existing = self.db.execute(
+                "SELECT 1 FROM director_dispatch_reservations WHERE proposal_id=?", (proposal_id,)
+            ).fetchone()
+            if existing is not None:
+                return "reserved"
+            signal = self.db.execute(
+                "SELECT fresh_until FROM director_signals WHERE id=?", (proposal["signal_id"],)
+            ).fetchone()
+            if signal is None or datetime.fromisoformat(signal["fresh_until"]) <= self.clock():
+                now = _iso(self.clock())
+                self.db.execute(
+                    "UPDATE director_proposals SET status='rejected', decision_json=?, updated_at=?, version=version+1 "
+                    "WHERE id=? AND status='accepted'",
+                    (json.dumps({"decision": "rejected", "reason": "SIGNAL_STALE_AT_DISPATCH"}, sort_keys=True),
+                     now, proposal_id),
+                )
+                self.events.append("organization.proposal_rejected", project_id=proposal["project_id"],
+                                   source="director", source_id=proposal_id,
+                                   payload={"reason": "SIGNAL_STALE_AT_DISPATCH"})
+                return "signal_stale"
+            budget = json.loads(mission["budget_json"])
+            max_active_jobs = int(budget.get("max_active_jobs", 1))
+            active_jobs = self.db.execute(
+                """SELECT COUNT(*) FROM director_proposals p JOIN jobs j ON j.id=p.job_id
+                   WHERE p.mission_id=? AND p.status='queued'
+                     AND j.status IN ('queued','leased','running')""",
+                (mission["id"],),
+            ).fetchone()[0]
+            reservations = self.db.execute(
+                "SELECT COUNT(*) FROM director_dispatch_reservations WHERE mission_id=?",
+                (mission["id"],),
+            ).fetchone()[0]
+            if active_jobs + reservations >= max_active_jobs:
+                return "capacity_exhausted"
+            now = _iso(self.clock())
+            self.db.execute(
+                "INSERT INTO director_dispatch_reservations(proposal_id, mission_id, created_at) VALUES (?, ?, ?)",
+                (proposal_id, mission["id"], now),
+            )
+            self.events.append("organization.proposal_dispatch_reserved", project_id=proposal["project_id"],
+                               source="director", source_id=proposal_id,
+                               payload={"mission_id": mission["id"]})
+            return "reserved"
+
+    def release_proposal_dispatch(self, proposal_id: str) -> bool:
+        """Release a slot when the dispatcher confirms it created no Core job."""
+        with self.db.transaction():
+            proposal = self.db.execute(
+                "SELECT project_id, status FROM director_proposals WHERE id=?", (proposal_id,)
+            ).fetchone()
+            if proposal is None:
+                raise KeyError(proposal_id)
+            if proposal["status"] != "accepted":
+                return False
+            deleted = self.db.execute(
+                "DELETE FROM director_dispatch_reservations WHERE proposal_id=?", (proposal_id,)
+            ).rowcount
+            if deleted:
+                self.events.append("organization.proposal_dispatch_released", project_id=proposal["project_id"],
+                                   source="director", source_id=proposal_id)
+            return deleted == 1
 
     def reconcile_proposal_outcomes(self, mission_id: str) -> int:
         """Mirror only terminal Core outcomes; success requires a verified Core artifact."""
@@ -454,18 +541,21 @@ class OrganizationRegistry:
         proposal = self.db.execute("SELECT * FROM director_proposals WHERE id=?", (proposal_id,)).fetchone()
         if proposal is None:
             raise KeyError(proposal_id)
-        if proposal["status"] == "queued":
-            if proposal["task_id"] != task_id or proposal["job_id"] != job_id:
-                raise ValueError("proposal already queued with a different task or job")
-            return proposal
-        if proposal["status"] != "accepted":
-            raise ValueError("only accepted proposals can be queued")
-        mission = self.mission(proposal["mission_id"])
-        if mission["status"] != "active" or datetime.fromisoformat(mission["expires_at"]) <= self.clock():
-            raise ValueError("mission is not active at dispatch time")
-        if "coding.propose" not in json.loads(mission["delegated_scopes_json"]):
-            raise ValueError("mission does not delegate proposal approval")
         with self.db.transaction():
+            current = self.db.execute("SELECT * FROM director_proposals WHERE id=?", (proposal_id,)).fetchone()
+            if current["status"] == "queued":
+                if current["task_id"] != task_id or current["job_id"] != job_id:
+                    raise ValueError("proposal already queued with a different task or job")
+                return current
+            if current["status"] != "accepted":
+                raise ValueError("only accepted proposals can be queued")
+            if self.db.execute(
+                    "SELECT 1 FROM director_dispatch_reservations WHERE proposal_id=?", (proposal_id,)
+            ).fetchone() is None:
+                raise ValueError("proposal has no reserved mission execution slot")
+            # The durable reservation was acquired while the mission was active
+            # and in scope. It is the dispatch linearization point; finishing
+            # that in-flight enqueue must survive a concurrent pause/restart.
             changed = self.db.execute(
                 "UPDATE director_proposals SET status='queued', task_id=?, job_id=?, updated_at=?, version=version+1 "
                 "WHERE id=? AND status='accepted'",
@@ -473,7 +563,8 @@ class OrganizationRegistry:
             ).rowcount
             if changed != 1:
                 raise ValueError("proposal state changed before dispatch receipt")
-            self.events.append("organization.proposal_queued", project_id=proposal["project_id"],
+            self.db.execute("DELETE FROM director_dispatch_reservations WHERE proposal_id=?", (proposal_id,))
+            self.events.append("organization.proposal_queued", project_id=current["project_id"],
                                source="director", source_id=proposal_id,
                                payload={"task_id": task_id, "job_id": job_id})
         return self.db.execute("SELECT * FROM director_proposals WHERE id=?", (proposal_id,)).fetchone()

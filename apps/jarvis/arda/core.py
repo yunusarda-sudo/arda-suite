@@ -806,6 +806,23 @@ class Database:
                 self.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                                   (16, _iso(_utc_now())))
             migrations.append(16)
+        applied = {row[0] for row in self.conn.execute("SELECT version FROM schema_migrations")}
+        if 17 not in applied:
+            with self.transaction():
+                for statement in (
+                    """CREATE TABLE director_dispatch_reservations (
+                        proposal_id TEXT PRIMARY KEY,
+                        mission_id TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY(proposal_id) REFERENCES director_proposals(id) ON DELETE CASCADE,
+                        FOREIGN KEY(mission_id) REFERENCES organization_missions(id)
+                    )""",
+                    "CREATE INDEX director_dispatch_reservations_mission_idx ON director_dispatch_reservations(mission_id, created_at)",
+                ):
+                    self.conn.execute(statement)
+                self.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                                  (17, _iso(_utc_now())))
+            migrations.append(17)
         return migrations
 
 

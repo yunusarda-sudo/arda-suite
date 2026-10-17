@@ -14,7 +14,7 @@ The Director proposes. Core remains the authority for mission scope, risk, budge
 
 1. **Mission registry:** versioned project-scoped mission identity, objectives/metrics, permitted repositories/domains, risk and cost limits, expiration, pause/cancel state, and optimistic concurrency.
 2. **Signal adapters:** read-only, injectable observers for GitHub issues/PRs/CI and existing project/deadline signals. Each normalized signal carries provider, project, source identifier, observed time, source update time, payload hash, freshness, and stable deduplication key.
-3. **Proposal ledger:** persist observation and proposal lifecycle before dispatch. Unique keys bind mission + source + normalized signal version; replay is idempotent. Unknown external outcome is never blindly replayed.
+3. **Proposal ledger:** persist observation and proposal lifecycle before dispatch. Unique keys bind mission + source + normalized signal version; replay is idempotent. A SQLite transaction reserves mission execution capacity before enqueue; a durable reservation survives a process restart and retries with the Core queue's idempotency key.
 4. **Director:** bounded proposal generation via an injected model/planner interface. Test doubles exercise policy now; model/provider routing is completed in WP-4. The Director returns a bounded DAG or one task proposal with explicit dependencies, risk, estimates, repository scope, and independently checkable acceptance criteria.
 5. **Core validation/dispatch:** validate active mission, fresh signal, repository/domain allowlist, risk, budget, duplicate state, max active jobs, and task contract before creating a Core task/job. Persist decision/reason and link mission, proposal, task, job, and run identifiers.
 6. **Recovery and control:** restart resumes undelivered observations/proposals safely; pause/cancel/expiry prevents new dispatch. Minimal read-only status and pause controls precede UI polish.
@@ -46,12 +46,13 @@ The Director proposes. Core remains the authority for mission scope, risk, budge
 - No GitHub write scope is needed for observation. Credentials remain in the trusted host/provider layer and are never copied to worker or sandbox environments.
 - Model output is untrusted data. Core validates all IDs, scope, risk, acceptance criteria, resource estimates, and transition preconditions.
 - Unique constraints and transactional writes prevent duplicate proposal/task/job creation on signal replay. Dispatch records the stable idempotency key before/with queue creation.
-- Pause/cancel/expiry are checked at proposal acceptance and immediately before dispatch. Leases and existing artifact/acceptance fencing remain unchanged.
-- Rollback: disable the Director scheduler/dispatch flag; preserve durable audit rows; revert only WP-2 migrations/code after taking a database backup. Never force-reset accepted Git refs.
+- Pause/cancel/expiry, delegated execution scope, and source-signal freshness are checked atomically when dispatch capacity is reserved. The reservation is the dispatch linearization point; an in-flight reservation completes across a concurrent pause. Leases and existing artifact/acceptance fencing remain unchanged.
+- Mission active-job capacity is serialized by SQLite reservations. A crash after reservation retries the same stable Core enqueue; a confirmed no-handoff releases its slot.
+- Rollback: disable the Director scheduler/dispatch flag; preserve durable audit rows; migration 17 is additive, so leave its reservation table in place if reverting code. Take a database backup before changing migration state. Never force-reset accepted Git refs.
 
 ## Operator setup (local/API)
 
-1. Back up the Core SQLite database before updating; migration 16 adds mission, signal, and proposal tables.
+1. Back up the Core SQLite database before updating; migration 16 adds mission, signal, and proposal tables, and migration 17 adds durable dispatch-slot reservations.
 2. Start the Control Plane with `ARDA_DIRECTOR_ENABLED=1`. Set `ARDA_GITHUB_TOKEN` (or `GITHUB_TOKEN`) only for private repositories or higher API limits. The observer exposes GET-only GitHub calls.
 3. Create a mission through `POST /api/organizations/{project_id}/missions` with `title`, `objective`, non-empty `acceptance_metrics`, `allowed_repositories`, and timezone-aware `expires_at`. Optional fields are `allowed_domains`, `delegated_scopes`, `allowed_risks`, and bounded `budget`.
 4. Use `GET /api/organizations/{project_id}/missions` or `GET /api/missions/{mission_id}` to inspect observations/proposals. Pause with `POST /api/missions/{mission_id}/state` and `{ "status": "paused", "expected_version": N, "reason": "operator pause" }`.
@@ -71,8 +72,8 @@ Local service opt-in is not a Pi deployment or unattended coding authorization. 
 
 ## Evidence from this implementation pass
 
-- Focused current integration command: `./.venv/bin/python -m pytest -o addopts='' -q tests/test_autonomous_director.py tests/test_control_plane.py tests/test_scheduler.py tests/test_organization.py tests/test_execution_bridge.py`: **38 passed**. `py_compile` for the Director and its tests plus `git diff --check` passed.
-- `PASS` — regression test for `max_active_jobs`: two simultaneously accepted proposals produce only one active job at capacity 1; the second remains durable and dispatches after the first job completes with a verified artifact.
+- Focused current integration command: `./.venv/bin/python -m pytest -o addopts='' -q tests/test_core.py tests/test_autonomous_director.py tests/test_control_plane.py tests/test_scheduler.py tests/test_organization.py tests/test_execution_bridge.py tests/test_capabilities.py tests/test_explorer.py tests/test_diagnostics.py`: **77 passed**. `make compile` and `git diff --check` passed.
+- `PASS` — regression tests show capacity-1 dispatch is respected; simultaneous SQLite reservations allow one winner; a reserved proposal is recovered after restart and enqueued once; stale source evidence is rejected immediately before a new dispatch.
 - Current broad run excluding two test modules that import absent Hermes scripts and local-only `test_brain.py`: **1,269 passed, 1 failed**. The failure is the known unrelated memory identity expectation (`default` vs `example-user`); it is not changed here.
 - Current unfiltered `make test` is `BLOCKED` at collection by `ModuleNotFoundError` for `scripts.run_hermes_baseline_batch` and `scripts.capture_hermes_baseline`, absent from this checkout.
 - A live unauthenticated read-only scan of public `pallets/flask` successfully fetched issues, PRs, and workflow runs and persisted four normalized signals to a temporary Core database. The latest bounded sample contained no qualifying fresh CI failure, so it correctly generated no proposal and dispatched nothing.

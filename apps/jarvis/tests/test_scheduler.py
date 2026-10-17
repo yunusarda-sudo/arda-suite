@@ -29,7 +29,7 @@ def seed_project(db, *, project_id="sample-project", updated_at="2026-10-01T00:0
 def test_scheduler_migration_is_idempotent(tmp_path):
     path = tmp_path / "migration.sqlite3"
     first = Database(path)
-    assert first.migrate() == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    assert first.migrate() == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     assert first.migrate() == []
     assert first.table_exists("schedules")
     assert first.table_exists("scheduler_ticks")
