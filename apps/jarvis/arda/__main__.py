@@ -53,6 +53,7 @@ def _load_desktop_runtime() -> None:
     from arda.agent import AgentDeps, run_forever
     from arda.agent_executor import AgentRunDeps
     from arda.browser_adapter import CamofoxClient
+    from arda.browser_sessions import BrowserSessionRegistry
     from arda.agent_skills import SkillError, select_skill
     from arda.agent_tools import ToolContext
     from arda.config import ConfigError, load_config
@@ -210,6 +211,18 @@ def _build_run_agent(cfg: dict, controls: Controls):
     # Denetim günlüğü: agent.log_dir (yoksa vault/AgentRuns) → "Jarvis dosyalarıma ne yaptı?"
     log_dir = agent_cfg.get("log_dir") or (Path(cfg["vault"]["path"]).expanduser() / "AgentRuns")
     browser_cfg = cfg.get("browser", {})
+    project_id = str(browser_cfg.get("project_id", "")).strip()
+    browser_session_id = str(browser_cfg.get("session_id", "")).strip()
+    browser_authorize = None
+    if project_id and browser_session_id:
+        def browser_authorize(url):
+            database = bootstrap_runtime_database()
+            try:
+                return BrowserSessionRegistry(database).authorize(
+                    browser_session_id, project_id, url=url
+                )
+            finally:
+                database.close()
     browser = CamofoxClient(
         base_url=str(browser_cfg.get("base_url", "http://localhost:9377")),
         api_key=os.environ.get("CAMOFOX_API_KEY", ""),
@@ -222,8 +235,7 @@ def _build_run_agent(cfg: dict, controls: Controls):
         ui_automation_enabled=bool(agent_cfg.get("ui_automation", True)),
         research_fn=lambda query: _agent_research(query, cfg),
         browser_client=browser,
-        browser_user_id=str(browser_cfg.get("user_id", "jarvis")),
-        browser_session_key=str(browser_cfg.get("session_key", "jarvis-agent")),
+        browser_session_authorize=browser_authorize,
     )
     deps = AgentRunDeps(
         plan=lambda req: agent_planner.plan(req, cfg=cfg),

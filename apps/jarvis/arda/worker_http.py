@@ -26,6 +26,7 @@ from arda.worker_protocol import (
     ProtocolRequest,
     ProtocolUnavailableError,
     WorkerProtocolServer,
+    WorkerCapabilityError,
     _canonical,
     _reject_duplicate_keys,
 )
@@ -290,6 +291,8 @@ class WorkerHTTPServer:
                     return  # Delivery may have committed; replay remains Core-owned.
                 except socket.timeout:
                     self._error(HTTPStatus.REQUEST_TIMEOUT, "request timeout")
+                except WorkerCapabilityError as exc:
+                    self._error(HTTPStatus.FORBIDDEN, str(exc))
                 except (ProtocolAuthenticationError, PermissionError) as exc:
                     self._error(HTTPStatus.UNAUTHORIZED, str(exc))
                 except (ProtocolReplayConflictError, ProtocolReplayInFlightError, StaleLeaseError) as exc:

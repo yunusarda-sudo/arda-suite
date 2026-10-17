@@ -118,11 +118,11 @@ agent:                   # Faz 5 — çok-adımlı desktop agent ("bu projeyi in
                          # (macOS Accessibility izni gerekir; tüm UI işlemleri ONAY ister)
   log_dir: null          # null → vault/AgentRuns. Her koşunun denetim günlüğü (agent-YYYY-MM-DD.md)
 
-browser:                 # Camofox HTTP browser adapter (salt-okunur ilk slice)
+browser:                 # Camofox adapter; project session grant is required for navigation
   base_url: http://localhost:9377
   timeout_seconds: 15
-  user_id: jarvis
-  session_key: ""
+  project_id: ""        # Core'da yetkilendirilen proje ile birebir aynı olmalı
+  session_id: ""        # BrowserSessionRegistry ile verilen süreli grant; yoksa browser actions fail-closed
 
 memory:                   # Ortak kalıcı hafıza (Claude Code ile aynı yerel mem0 deposu)
   enabled: false

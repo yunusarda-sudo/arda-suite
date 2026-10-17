@@ -11,6 +11,7 @@ import json
 import os
 import secrets
 import sqlite3
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -61,6 +62,8 @@ class Database:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.path), timeout=30, isolation_level=None)
+        self._transaction_lock = threading.RLock()
+        self._savepoint_seq = 0
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.execute("PRAGMA journal_mode = WAL")
@@ -789,6 +792,44 @@ class Database:
                 self.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                                   (18, _iso(_utc_now())))
             migrations.append(18)
+        applied = {row[0] for row in self.conn.execute("SELECT version FROM schema_migrations")}
+        if 21 not in applied:
+            with self.transaction():
+                for statement in (
+                    """CREATE TABLE browser_session_grants (
+                        session_id TEXT PRIMARY KEY,
+                        project_id TEXT NOT NULL,
+                        domains_json TEXT NOT NULL,
+                        user_id TEXT NOT NULL,
+                        session_key TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        revoked_at TEXT,
+                        created_by TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1
+                    )""",
+                    "CREATE INDEX browser_session_project_idx ON browser_session_grants(project_id, expires_at)",
+                    """CREATE TRIGGER browser_grants_scope_immutable
+                    BEFORE UPDATE ON browser_session_grants
+                    WHEN NEW.session_id != OLD.session_id
+                      OR NEW.project_id != OLD.project_id
+                      OR NEW.domains_json != OLD.domains_json
+                      OR NEW.user_id != OLD.user_id
+                      OR NEW.session_key != OLD.session_key
+                      OR NEW.created_at != OLD.created_at
+                      OR NEW.expires_at != OLD.expires_at
+                      OR NEW.created_by != OLD.created_by
+                      OR NEW.version != OLD.version + 1
+                      OR OLD.revoked_at IS NOT NULL
+                      OR NEW.revoked_at IS NULL
+                    BEGIN SELECT RAISE(ABORT, 'browser grant scope is immutable'); END""",
+                    """CREATE TRIGGER browser_grants_no_delete BEFORE DELETE ON browser_session_grants
+                    BEGIN SELECT RAISE(ABORT, 'browser grants are durable'); END""",
+                ):
+                    self.conn.execute(statement)
+                self.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                                  (21, _iso(_utc_now())))
+            migrations.append(21)
         return migrations
 
 
@@ -814,11 +855,31 @@ class _Transaction:
         self.immediate = immediate
 
     def __enter__(self):
-        self.db.conn.execute("BEGIN IMMEDIATE" if self.immediate else "BEGIN")
+        self.db._transaction_lock.acquire()
+        try:
+            self.nested = self.db.conn.in_transaction
+            if self.nested:
+                self.db._savepoint_seq += 1
+                self.savepoint = f"arda_nested_{self.db._savepoint_seq}"
+                self.db.conn.execute(f"SAVEPOINT {self.savepoint}")
+            else:
+                self.savepoint = None
+                self.db.conn.execute("BEGIN IMMEDIATE" if self.immediate else "BEGIN")
+        except Exception:
+            self.db._transaction_lock.release()
+            raise
         return self.db.conn
 
     def __exit__(self, exc_type, exc, tb):
-        self.db.conn.execute("ROLLBACK" if exc_type else "COMMIT")
+        try:
+            if self.savepoint:
+                if exc_type:
+                    self.db.conn.execute(f"ROLLBACK TO {self.savepoint}")
+                self.db.conn.execute(f"RELEASE {self.savepoint}")
+            else:
+                self.db.conn.execute("ROLLBACK" if exc_type else "COMMIT")
+        finally:
+            self.db._transaction_lock.release()
         return False
 
 

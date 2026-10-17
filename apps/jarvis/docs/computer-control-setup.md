@@ -17,6 +17,56 @@ riskli her işlem native onay dialog'u ister ve her koşu denetim günlüğüne 
 
 Tam otonom (onaysız) İSTEMEDİK — yanlış bir transkripsiyon/yorum geri alınamaz hasar verebilir.
 
+## Proje kapsamlı, süreli browser oturumu
+
+Camofox oturumu artık tek bir global `jarvis` profiline bağlanmamalı. Browser araçları
+yalnızca Core'da proje kimliği, açık domain listesi, oluşturma zamanı ve sona erme zamanı
+bulunan bir grant ile çalışır. Grant geri alınabilir ve domain listesi sonradan değiştirilemez.
+Grant yoksa browser health dışındaki işlemler fail-closed olur.
+
+Bir grant'i operatör olarak oluşturmak için uygulama sanal ortamında:
+
+```python
+from arda.core import bootstrap_runtime_database
+from arda.browser_sessions import BrowserSessionRegistry
+
+db = bootstrap_runtime_database()
+try:
+    grant = BrowserSessionRegistry(db).create(
+        "opvia", ["github.com", "docs.github.com"],
+        created_by="operator", ttl_seconds=3600,
+    )
+    print(grant["session_id"], grant["expires_at"])
+finally:
+    db.close()
+```
+
+`config.local.yaml` içindeki `browser.project_id` ve `browser.session_id` alanlarını grant
+ile eşleştir. Grant kimliğini yalnız ilgili cihazın yerel config'inde tut. Grant'i geri almak
+için aynı sanal ortamda şu kodu çalıştır:
+
+```python
+from arda.core import bootstrap_runtime_database
+from arda.browser_sessions import BrowserSessionRegistry
+
+db = bootstrap_runtime_database()
+try:
+    BrowserSessionRegistry(db).revoke("bs_...", revoked_by="operator")
+finally:
+    db.close()
+```
+
+Sonraki browser araç çağrıları reddedilir. Revocation, zaten açılmış browser sürecini
+kendiliğinden kapatmaz; bu yüzden unattended worker'da grant revocation olayını browser
+oturumunu kapatmaya bağlayan process supervisor ve egress firewall ayrıca gerekir.
+
+Domain allowlist'i uygulama katmanında ilk URL'yi doğrular ve navigasyon/snapshot sonunda
+gözlenen URL'yi tekrar denetler. Tarayıcı redirect'i yanıt alınmadan önce izlemiş olabilir;
+bu nedenle bu kontrol egress sandbox'ı değildir. Dış sitelerle unattended kullanım için
+Camofox worker'ının kendisi redirect/DNS-rebinding dahil network egress ACL'li izole bir
+host/container içinde çalışmalı. Bu repo kodu o fiziksel ağ izolasyonunu kurmuş veya
+doğrulamış sayılmaz.
+
 ## macOS izinleri (UI otomasyonu için ŞART)
 
 `ui_type` / `ui_keystroke` / `ui_click_menu` / `run_applescript` System Events kullanır.

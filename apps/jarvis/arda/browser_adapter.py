@@ -8,10 +8,18 @@ from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
+from arda.browser_sessions import host_in_scope
 
 
 class BrowserError(RuntimeError):
     """A bounded browser-service or validation failure."""
+
+
+def _scoped_destination(url: str, allowed_domains: tuple[str, ...] | list[str], *, resolver=socket.getaddrinfo) -> str:
+    parsed = urlparse((url or "").strip())
+    if not parsed.hostname or not host_in_scope(parsed.hostname, allowed_domains):
+        raise BrowserError("Hedef, bu proje için yetkilendirilmiş browser domain kapsamı dışında")
+    return _public_destination(url, resolver=resolver)
 
 
 def _public_destination(url: str, *, resolver=socket.getaddrinfo) -> str:
@@ -91,31 +99,42 @@ class CamofoxClient:
     def health(self) -> dict:
         return self._json("GET", "/health")
 
-    def create_tab(self, *, user_id: str, session_key: str, url: str | None = None) -> dict:
+    def create_tab(self, *, user_id: str, session_key: str, url: str | None = None,
+                   allowed_domains: tuple[str, ...] | list[str] = ()) -> dict:
         body = {"userId": user_id, "sessionKey": session_key}
         if url:
-            body["url"] = _public_destination(url)
+            body["url"] = _scoped_destination(url, allowed_domains)
         value = self._json("POST", "/tabs", body=body)
         if not isinstance(value.get("tabId"), str) or not value["tabId"]:
             raise BrowserError("Camofox tabId döndürmedi")
+        observed_url = value.get("url")
+        if observed_url and observed_url != "about:blank":
+            _scoped_destination(observed_url, allowed_domains)
         return value
 
-    def navigate(self, *, user_id: str, session_key: str, tab_id: str, url: str) -> dict:
+    def navigate(self, *, user_id: str, session_key: str, tab_id: str, url: str,
+                 allowed_domains: tuple[str, ...] | list[str] = ()) -> dict:
         value = self._json(
             "POST", f"/tabs/{quote(tab_id, safe='')}/navigate",
-            body={"userId": user_id, "sessionKey": session_key, "url": _public_destination(url)},
+            body={"userId": user_id, "sessionKey": session_key,
+                  "url": _scoped_destination(url, allowed_domains)},
         )
         if value.get("ok") is False:
             raise BrowserError(str(value.get("error") or "Camofox navigation başarısız"))
+        observed_url = value.get("url")
+        if observed_url:
+            _scoped_destination(observed_url, allowed_domains)
         return value
 
-    def snapshot(self, *, user_id: str, tab_id: str) -> dict:
+    def snapshot(self, *, user_id: str, tab_id: str,
+                 allowed_domains: tuple[str, ...] | list[str] = ()) -> dict:
         value = self._json(
             "GET", f"/tabs/{quote(tab_id, safe='')}/snapshot",
             query={"userId": user_id, "format": "text"},
         )
         if not isinstance(value.get("snapshot"), str) or not isinstance(value.get("url"), str):
             raise BrowserError("Camofox snapshot şeması geçersiz")
+        _scoped_destination(value["url"], allowed_domains)
         return value
 
     def screenshot(self, *, user_id: str, tab_id: str) -> bytes:

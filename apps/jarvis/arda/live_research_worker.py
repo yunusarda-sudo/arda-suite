@@ -10,7 +10,7 @@ from typing import Any
 from arda.live_research import LiveSourceAcquirer, SafeHTTPFetcher, SearchAdapter
 from arda.research_worker import FixtureSourceAdapter, ResearchBudgetError, ResearchContractError, ResearchSourceError, ResearchTask, build_research, canonical_json
 from arda.research_synthesis import ModelGateway, render_synthesis_markdown, synthesize_research
-from arda.worker_protocol import WorkerProtocolClient
+from arda.worker_protocol import WorkerLeaseGuard, WorkerProtocolClient
 
 
 @dataclass(frozen=True)
@@ -78,22 +78,29 @@ class LiveResearchWorker:
         lease = {"job_id": claim["job_id"], "lease_token": claim["lease_token"]}
         try:
             self.client.request("start", lease, request_id=f"{run_id}:start")
-            job = self.client.request("describe", lease, request_id=f"{run_id}:describe")
-            spec = LiveResearchJob.from_objective(job["objective"])
-            acquired = self.acquirer.acquire(spec.query, self.search, max_sources=spec.max_sources)
-            if not acquired.sources:
-                raise ResearchSourceError("live acquisition returned no valid sources")
-            source_refs = tuple(source.uri for source in acquired.sources)
-            deterministic = build_research(spec.objective_for_sources(source_refs), FixtureSourceAdapter({source.uri: source for source in acquired.sources}))
-            deterministic["acquisition_failures"] = list(acquired.failures)
-            result = synthesize_research(
-                deterministic,
-                self.gateway,
-                model=self.model,
-                max_evidence=self.max_evidence,
-                max_excerpt_chars=self.max_excerpt_chars,
-                max_contract_retries=self.max_contract_retries,
-            )
+            with WorkerLeaseGuard(self.client, lease["job_id"], lease["lease_token"],
+                                  run_id=run_id) as guard:
+                job = self.client.request("describe", lease, request_id=f"{run_id}:describe")
+                spec = LiveResearchJob.from_objective(job["objective"])
+                guard.ensure_current()
+                acquired = self.acquirer.acquire(spec.query, self.search, max_sources=spec.max_sources,
+                                                 cancel_event=guard.cancel_event)
+                guard.ensure_current()
+                if not acquired.sources:
+                    raise ResearchSourceError("live acquisition returned no valid sources")
+                source_refs = tuple(source.uri for source in acquired.sources)
+                deterministic = build_research(spec.objective_for_sources(source_refs), FixtureSourceAdapter({source.uri: source for source in acquired.sources}))
+                deterministic["acquisition_failures"] = list(acquired.failures)
+                guard.ensure_current()
+                result = synthesize_research(
+                    deterministic,
+                    self.gateway,
+                    model=self.model,
+                    max_evidence=self.max_evidence,
+                    max_excerpt_chars=self.max_excerpt_chars,
+                    max_contract_retries=self.max_contract_retries,
+                )
+                guard.ensure_current()
             json_bytes = canonical_json(result)
             markdown_bytes = render_synthesis_markdown(result).encode("utf-8")
             if len(json_bytes) + len(markdown_bytes) > self.max_output_bytes:
