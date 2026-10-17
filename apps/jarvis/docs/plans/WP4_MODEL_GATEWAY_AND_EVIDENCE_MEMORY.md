@@ -1,6 +1,6 @@
 # WP-4: Model Gateway, Fallback, and Evidence-Driven Memory
 
-Status: **IN-PROCESS GATEWAY + STRUCTURED MEMORY IMPLEMENTED; LIVE ACCEPTANCE PARTIAL**
+Status: **IMPLEMENTED; OPEN DRAFT PR #9 STACKED ON PR #7; LIVE ACCEPTANCE PARTIAL**
 
 ## Purpose and starting point
 
@@ -32,6 +32,7 @@ Live documentation/repository research compared:
 - `PASS` — `python3 -m pytest -q test_retrieval_compare.py` from `services/memory`: **13 passed**.
 - `PASS` — live synthetic public-prompt smoke via configured route: OpenAI `gpt-4o-mini` returned JSON with 23 input/5 output tokens; local Ollama `qwen3:1.7b` returned JSON with 32 prompt/6 output tokens. No prompt secrets or repository content were sent.
 - `PASS` — `python -m py_compile` on changed Python modules, shell syntax checks for the relevant existing installers, and `git diff --check`.
+- `NOT_RUN` — GitHub CI; PR #9 currently reports no configured status checks for its branch.
 - Synthetic fixtures do not prove live retrieval quality or provider semantics. The currently configured host reports one OpenAI API credential and a local Ollama with `qwen3:8b`, `qwen2.5:7b-instruct`, `qwen3:1.7b`, and `nomic-embed-text:latest`; no second hosted provider credential is configured. Two independent hosted API provider acceptance, forced live 429/timeout/malformed/streaming tests, paid-fallback billing, and exact-model tool conformance remain blocked pending a second provider account/credential and deliberate live test window.
 - The current in-process text gateway supports chat and schema-constrained JSON. Streaming, vision, and model tool-call execution are deliberately not advertised as supported capabilities; no profile can route a task requiring them.
 - Live smoke probes on this host returned `{"ok":true}` from OpenAI `gpt-4o-mini` (23 input / 5 output tokens) and local Ollama `qwen3:1.7b` (32 prompt / 6 output tokens). These used a public synthetic prompt and prove basic request/response only. No hosted pricing was recorded, and the second independent hosted API provider remains unavailable.
