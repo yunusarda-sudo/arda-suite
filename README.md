@@ -1,7 +1,5 @@
-# ARDA Suite
-
 <p align="center">
-  <strong>Local-first assistant infrastructure, bounded agent execution, and persistent shared memory.</strong>
+  <img src="assets/banner.svg" alt="ARDA Suite Banner" width="100%" />
 </p>
 
 <p align="center">
@@ -18,15 +16,9 @@
 
 Each component is independently deployable with its own Python environment and isolated lifecycle.
 
-```mermaid
-flowchart LR
-    User([👤 User / Voice]) --> Jarvis[🎙️ Jarvis Assistant]
-    Jarvis --> Planner[Core Planner]
-    Planner --> Gate{🛡️ Permission Gate<br/>AUTO / CONFIRM / DENY}
-    Gate -->|Allowed / Confirmed| Exec[⚙️ Tool Execution & Audit]
-    Gate -->|Denied| Refuse[🚫 Recorded Refusal]
-    Jarvis -. MCP Transport .-> Memory[(🧠 Shared Memory<br/>mem0 + Qdrant)]
-```
+<p align="center">
+  <img src="assets/architecture-flow.svg" alt="ARDA Suite Architecture Flow" width="100%" />
+</p>
 
 ---
 
