@@ -1,6 +1,6 @@
 # WP-4: Model Gateway, Fallback, and Evidence-Driven Memory
 
-Status: **IMPLEMENTED; OPEN DRAFT PR #9 STACKED ON PR #7; LIVE ACCEPTANCE PARTIAL**
+Status: **LOCAL INTEGRATION IMPLEMENTED; OPEN DRAFT PR #9 STACKED ON PR #7; LIVE ACCEPTANCE PARTIAL**
 
 ## Purpose and starting point
 
@@ -23,12 +23,17 @@ Live documentation/repository research compared:
 - `ModelTransientError`, `ModelRateLimitedError`, and `ModelAuthenticationError` separate retryable/provider-quota failures from permanent credential denial. `BudgetedModelGateway` retries only explicitly transient generation errors. OpenAI-compatible and Ollama HTTP status handling does not include provider response bodies in error messages.
 - `arda.evidence_memory` adds an append-only structured evidence ledger keyed by project. Records require HTTPS source provenance, source SHA-256, timezone-aware observation/expiry, and are excluded from recall after expiry or outside their project. High-confidence bearer/API-key/email/phone patterns are redacted before persistence; this is not a general PII detector, so source ingestion still needs policy and review. A deterministic fixture evaluator reports precision@k, recall@k, false recalls, and recall lift over an empty-memory baseline.
 - Existing `services/memory/retrieval_compare.py` remains the semantic retrieval experiment. Its existing [methodology](../../../../services/memory/docs/retrieval-comparison.md) already provides no-memory/semantic baselines, judged relevance, Recall@k, MRR@k, nDCG@k and dataset fingerprints. It requires reviewed, local evaluation snapshots; synthetic tests are mechanics-only.
+- `LiveResearchWorker.from_config()` is now the configured composition path: it builds the exact route, persists the route/profile hashes to Core SQLite, and supplies the same routed gateway and project-scoped evidence ledger to the existing leased research flow. Core's lease-validated job description includes `project_id`; the worker recalls only unexpired records for that project, presents them as sourced evidence to the same deterministic claim validator, and records fetched HTTPS content with its source digest and a bounded expiry after the lease fence. Research artifacts include the route snapshot hash. Legacy injected gateways remain supported for fixtures and callers.
 
 ## Verification and remaining gates
 
 - The provider profile store uses Core migrations 19-20 on top of WP-1's current migration head. The migration is append-only and route versions bind exact model profile snapshots.
 - Unit/fault tests cover transient fallback, authentication denial, private-data fallback rejection, capability mismatch, paid fallback gating, cost preflight, cooldown, bounded deadlines, credential-redacted HTTP classifications, route snapshot integrity, memory scope, expiry, PII/secret redaction, idempotency, and retrieval scores.
 - `PASS` — `./.venv/bin/python -m pytest -o addopts='' -q`: **1366 passed, 5 skipped in 45.13s** on the WP-1-integrated branch. The five skipped cases are live Ollama classification checks requiring the ignored local vault config.
+- `PASS` — current integration slice: `./.venv/bin/python -m pytest -o addopts='' -q tests/test_live_research_worker.py tests/test_model_routes.py tests/test_evidence_memory.py tests/test_worker_protocol.py`: **26 passed**. The end-to-end fixture verifies Core project scope, routed snapshot persistence, memory recall entering the model evidence pack, lease-fenced artifact publication, and memory persistence.
+- `PASS` — current full Jarvis suite: `make test`: **1367 passed, 5 skipped in 44.07s**. The skipped cases require live Ollama/local-vault configuration.
+- `PASS` — current `make compile`, `git diff --check`, and Shared Memory `python3 -m pytest -q test_retrieval_compare.py`: **13 passed**.
+- `NOT_RUN` — long-running production research worker boot/service integration. This checkout has the leased `LiveResearchWorker` and its configured composition factory, but no production launcher currently invokes that factory.
 - `PASS` — `python3 -m pytest -q test_retrieval_compare.py` from `services/memory`: **13 passed**.
 - `PASS` — live synthetic public-prompt smoke via configured route: OpenAI `gpt-4o-mini` returned JSON with 23 input/5 output tokens; local Ollama `qwen3:1.7b` returned JSON with 32 prompt/6 output tokens. No prompt secrets or repository content were sent.
 - `PASS` — `python -m py_compile` on changed Python modules, shell syntax checks for the relevant existing installers, and `git diff --check`.
@@ -45,6 +50,7 @@ Live documentation/repository research compared:
 - [x] Add exact model capability/privacy/cost profiles, append-only versioned routes, bounded transient fallback, cooldown, and safe health metadata.
 - [x] Keep model retry separate from tool/action retry; permanent auth denial and unsupported capability never fall back.
 - [x] Store project-scoped sourced, time-valid structured memory with secret/PII redaction and a deterministic no-memory retrieval baseline.
+- [x] Connect policy-routed generation and project-scoped evidence recall/write to the existing leased live-research worker path.
 - [x] Exercise one authorized hosted API route and the local Ollama route with non-sensitive synthetic prompts.
 - [ ] Test two real hosted providers plus local Ollama; validate actual 429, timeout, malformed/partial response, auth denial, privacy-denied fallback, cost, and streaming/tool/JSON behavior.
 - [ ] Run reviewed real-project retrieval labels through semantic/no-memory comparison and report measured quality deltas.

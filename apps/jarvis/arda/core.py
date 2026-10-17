@@ -1123,6 +1123,7 @@ class JobQueue:
         row = self._verify_lease(job_id, lease_token, ("leased", "running"))
         return {
             "job_id": row["id"],
+            "project_id": row["project_id"],
             "type": row["type"],
             "objective": row["objective"],
             "acceptance_criteria": json.loads(row["acceptance_criteria"]),

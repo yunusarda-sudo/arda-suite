@@ -297,6 +297,13 @@ class RoutedModelGateway:
             return False
         return True
 
+    def persist_snapshot(self, store: SQLiteModelRouteStore) -> str:
+        """Persist the exact route and model identities used by this gateway."""
+        profiles = [self._profiles[key] for key in self.policy.profile_ids]
+        for profile in profiles:
+            store.append_profile(profile)
+        return store.append_route(self.policy, profiles)
+
     @staticmethod
     def _estimated_cost(profile: ModelProfile, *, prompt_bytes: int, max_output_tokens: int) -> float | None:
         input_rate, output_rate = profile.input_usd_per_million_tokens, profile.output_usd_per_million_tokens
