@@ -34,7 +34,7 @@ def db(tmp_path):
 def test_migrations_are_idempotent_and_survive_reopen(tmp_path):
     path = tmp_path / "arda.sqlite3"
     first = Database(path)
-    assert first.migrate() == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    assert first.migrate() == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
     assert first.migrate() == []
     first.close()
 
@@ -42,6 +42,8 @@ def test_migrations_are_idempotent_and_survive_reopen(tmp_path):
     assert reopened.migrate() == []
     assert reopened.table_exists("events")
     assert reopened.table_exists("jobs")
+    assert reopened.table_exists("acceptance_intents")
+    assert reopened.scalar("SELECT MAX(version) FROM schema_migrations") == 18
     assert reopened.table_exists("requirement_contract_revisions")
     reopened.close()
 
@@ -52,7 +54,7 @@ def test_runtime_database_bootstrap_uses_versioned_migrations(tmp_path):
     try:
         assert database.path == path
         assert database.table_exists("schema_migrations")
-        assert database.scalar("SELECT MAX(version) FROM schema_migrations") == 15
+        assert database.scalar("SELECT MAX(version) FROM schema_migrations") == 18
     finally:
         database.close()
 
@@ -147,6 +149,11 @@ def test_complete_requires_verified_artifacts(db):
     content = b"report"
     digest = hashlib.sha256(content).hexdigest()
     queue.record_artifact(job.id, "test-report.json", "test-report.json", digest, content=content)
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        db.execute("UPDATE artifacts SET content=? WHERE job_id=?", (b"tampered", job.id))
+    stored = db.execute("SELECT content, sha256 FROM artifacts WHERE job_id=?", (job.id,)).fetchone()
+    assert bytes(stored["content"]) == content
+    assert hashlib.sha256(bytes(stored["content"])).hexdigest() == stored["sha256"]
     queue.complete(job.id, lease.lease_token, result={"ok": True})
     assert queue.get(job.id).status == "succeeded"
 

@@ -1,6 +1,6 @@
 """Jarvis ↔ Claude Code ortak yerel mem0 hafızası (import-güvenli sarmalayıcı).
 
-Aynı Qdrant collection'a (`mem0_local`) + `user_id="example-user"` + `nomic-embed-text`
+Qdrant collection (`mem0_local`) + default `user_id="default"` + `nomic-embed-text`
 embedder ile bağlanır → Claude Code (MCP) ile TEK ortak depo. mem0/Ollama/Qdrant
 erişilemezse tüm çağrılar sessizce no-op olur; pipeline ASLA kırılmaz.
 """
