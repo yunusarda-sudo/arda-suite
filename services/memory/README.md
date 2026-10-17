@@ -1,20 +1,29 @@
-# Shared Memory
+# Shared Memory Service
 
-Shared Memory is an optional local-first service for persistent memory. It
-combines a Python API/MCP server, Qdrant vector storage, Ollama model support,
-a dashboard, and maintenance tools. Jarvis can connect through its optional
-memory adapter; the two components keep separate Python environments.
+<p align="center">
+  <strong>Local-first persistent vector memory daemon with standardized Model Context Protocol (MCP) support.</strong>
+</p>
 
-## Quick start
+Shared Memory is an independent, local-first service providing long-term semantic memory for AI assistants and agent runtimes. It combines:
+- **Vector Storage**: [Qdrant](https://qdrant.tech/) vector database with local [Ollama](https://ollama.ai/) embeddings (`nomic-embed-text`) and memory extraction (`qwen2.5:7b-instruct`).
+- **Standardized Interfaces**: Model Context Protocol (MCP) HTTP endpoint with bearer-token authentication.
+- **Monitoring & Maintenance**: Interactive web dashboard, automated memory compaction, and offline retrieval evaluation harness.
+- **Client Integration**: Pluggable memory adapter for Jarvis and any MCP-compatible agent framework.
 
-For a Raspberry Pi or Linux host, start with the [Pi setup guide](docs/RASPBERRY-PI-SETUP.md).
-For development, see [installation](docs/INSTALL.md) and run the service's
-tests from this directory with `python3 -m pytest -q`.
+---
 
-The installer uses local Ollama models by default: `qwen2.5:7b-instruct` for
-LLM extraction and `nomic-embed-text` for embeddings. The Qwen model needs
-about 4.7 GB for its weights; available memory and performance depend on the
-host. Existing `~/.mem0/config.env` files are preserved.
+## Quickstart
+
+For Raspberry Pi or Linux hosts, see the [Pi Setup Guide](docs/RASPBERRY-PI-SETUP.md) or run the automated installer:
+```bash
+./scripts/install-pi.sh
+```
+
+For local development and testing:
+```bash
+# See docs/INSTALL.md for detailed environment prerequisites
+python3 -m pytest -q
+```
 
 ## Data and network boundaries
 

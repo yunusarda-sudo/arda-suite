@@ -33,9 +33,11 @@ flowchart LR
 ## Key Pillars
 
 - 🎙️ **Jarvis Desktop Assistant (`apps/jarvis`)**
-  - macOS menu bar voice assistant with push-to-talk (`⌘⇧A`) and optional always-on wake word.
-  - Headless daemon mode for Linux and Raspberry Pi with offline speech recognition (Vosk).
-  - Handles voice conversations, macOS system automations, notes (Obsidian vault), and multi-step tasks.
+  - **Voice & Push-to-Talk (`⌘⇧A`)**: macOS menu bar voice assistant with instant push-to-talk and optional wake word.
+  - **Wispr Flow-Style Dictation (`⌘⇧D`)**: Floating dictation emblem that transcribes spoken voice directly into the active cursor in any app.
+  - **Desktop Automations & Notes**: Native macOS system control (apps, volume, timer, screen lock) and automatic Obsidian vault task sync.
+  - **Cross-Platform**: Headless background daemon mode for Linux and Raspberry Pi with offline speech recognition (Vosk).
+  - **Packaging**: Builds directly into native macOS `.app` bundle or distributable `.dmg` (`make app`, `make dmg`).
 
 - 🛡️ **Verifiable Bounded Execution (`apps/jarvis/arda`)**
   - **Permission Gates**: Every tool invocation is governed by an explicit `AUTO / CONFIRM / DENY` policy.
