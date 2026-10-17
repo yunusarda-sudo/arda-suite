@@ -1086,7 +1086,8 @@ class JobQueue:
             )
         return self.get(row["id"])
 
-    def request_cancel(self, job_id: str, *, requested_by: str) -> Job:
+    def request_cancel(self, job_id: str, *, requested_by: str,
+                       expected_version: int | None = None) -> Job:
         """Request cancellation; active workers retain their lease until they acknowledge."""
         actor = str(requested_by or "").strip()[:128]
         if not actor:
@@ -1096,6 +1097,8 @@ class JobQueue:
             row = self.db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
             if row is None:
                 raise KeyError(job_id)
+            if expected_version is not None and row["version"] != expected_version:
+                raise ValueError(f"job {job_id!r} version is stale; expected {expected_version}")
             if row["status"] in {"succeeded", "failed", "cancelled"}:
                 return self.get(job_id)
             if row["status"] in {"queued", "retry_wait"}:

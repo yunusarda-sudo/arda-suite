@@ -6,8 +6,16 @@ bilinmeyen eylem güvenli mesaja düşer, girdiler sınırlanır/doğrulanır.
 from datetime import datetime
 from types import SimpleNamespace
 
+import pytest
+
 from arda import actions
 from arda.actions import ActionDeps, run_action
+
+
+@pytest.fixture(autouse=True)
+def _macos_action_platform(monkeypatch):
+    """These tests assert the macOS command adapter, independent of CI host OS."""
+    monkeypatch.setattr("arda.platform_runtime.system", lambda: "Darwin")
 
 
 def _ok(stdout=""):

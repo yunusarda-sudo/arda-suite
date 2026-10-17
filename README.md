@@ -60,12 +60,13 @@ The components have separate Python environments. Jarvis does not import the mem
 Use separate environments for Jarvis and Shared Memory. From the repository root:
 
 ```bash
+make setup-test-env # one-time; use TEST_PYTHON=python3.11 if needed
 make test-jarvis
 make test-memory
 make check-shell
 ```
 
-The current GitHub Actions workflow checks shell syntax and the Shared Memory Pi installer safety tests. It does not run the full combined test suites.
+GitHub Actions runs the full Jarvis and Shared Memory test suites as well as installer shell-safety checks. The test targets use their app-specific virtual environments; they do not silently fall back to a system Python with a different dependency set.
 
 For the macOS Jarvis development setup:
 
