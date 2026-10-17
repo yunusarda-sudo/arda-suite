@@ -142,6 +142,36 @@ def test_superseded_lease_generation_cannot_promote_or_mutate_new_task_state(tmp
     assert subprocess.check_output(["git", "rev-parse", "refs/heads/accepted"], cwd=repo, text=True).strip() == old
 
 
+def test_cancellation_fences_acceptance_before_intent_and_before_git_cas(tmp_path):
+    # A request already present before intent creation cannot create an intent.
+    db_path = tmp_path / "before-intent.sqlite3"
+    repo, old, candidate = make_repo(tmp_path, "before-intent-repo")
+    job_id, token, generation, _ = lease(db_path)
+    db = bootstrap_runtime_database(db_path)
+    JobQueue(db).request_cancel(job_id, requested_by="test-operator")
+    db.close()
+    with pytest.raises(AcceptanceConflict, match="cancellation"):
+        prepare(coordinator(db_path), job_id=job_id, token=token, generation=generation,
+                repo=repo, old=old, candidate=candidate)
+    db = bootstrap_runtime_database(db_path)
+    try:
+        assert db.execute("SELECT COUNT(*) FROM acceptance_intents").fetchone()[0] == 0
+    finally:
+        db.close()
+
+    # A request arriving after intent persistence still prevents the Git CAS.
+    db_path = tmp_path / "before-cas.sqlite3"
+    repo, old, candidate = make_repo(tmp_path, "before-cas-repo")
+    job_id, token, generation, _ = lease(db_path)
+    core = coordinator(db_path)
+    intent_id = prepare(core, job_id=job_id, token=token, generation=generation,
+                        repo=repo, old=old, candidate=candidate)
+    JobQueue(core.db).request_cancel(job_id, requested_by="test-operator")
+    with pytest.raises(AcceptanceConflict, match="cancellation"):
+        core.promote(intent_id, lease_token=token)
+    assert subprocess.check_output(["git", "rev-parse", "refs/heads/accepted"], cwd=repo, text=True).strip() == old
+
+
 def test_executor_supplied_accepted_sha_is_rejected(tmp_path):
     db_path = tmp_path / "core.sqlite3"
     repo, old, candidate = make_repo(tmp_path)
