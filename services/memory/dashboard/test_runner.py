@@ -77,6 +77,8 @@ class RunnerFixture(unittest.TestCase):
                         pass
         for arch_id in self.arch_ids():
             wait_for(lambda: not runner.active(arch_id), timeout=5)
+            self.assertTrue(runner.wait_for_supervisors(arch_id, timeout=10),
+                            f"runner supervisor for {arch_id} did not finish cleanup")
         arch.ARCH_DIR = self._orig_dir
         for key, value in self._orig_env.items():
             if value is None:

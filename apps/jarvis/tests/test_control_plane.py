@@ -185,3 +185,51 @@ def test_control_center_rejects_malformed_json_and_non_object_payload(tmp_path):
     finally:
         server.shutdown()
         thread.join(timeout=2)
+
+
+def test_control_center_job_cancellation_is_versioned_and_origin_checked(tmp_path):
+    db_path = tmp_path / "core.sqlite3"
+    db = bootstrap_runtime_database(db_path)
+    job = JobQueue(db).enqueue("test", "operator cancellation", idempotency_key="cc-cancel")
+    version = db.execute("SELECT version FROM jobs WHERE id=?", (job.id,)).fetchone()["version"]
+    db.close()
+    plane = ControlPlane(db_path, evidence_root=tmp_path)
+
+    class Handler(ControlCenterHandler):
+        pass
+    Handler.plane = plane
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}/api/jobs/{job.id}/cancel"
+
+    def post(origin: str, expected_version: int, host: str | None = None):
+        headers = {"Content-Type": "application/json", "Origin": origin}
+        if host:
+            headers["Host"] = host
+        request = urllib.request.Request(
+            url,
+            data=json.dumps({"expected_version": expected_version,
+                             "requested_by": "test-operator"}).encode(),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request) as response:
+                return response.status, json.load(response)
+        except HTTPError as exc:
+            return exc.code, None
+
+    try:
+        assert post("http://attacker.example", version) == (403, None)
+        assert post(f"http://127.0.0.1:{server.server_port}", version,
+                    host="attacker.example") == (401, None)
+        status, result = post(f"http://127.0.0.1:{server.server_port}", version)
+        assert status == 200
+        assert result["status"] == "cancelled"
+        assert plane.jobs()[0]["cancel_requested_at"] is not None
+        assert plane.jobs()[0]["version"] > version
+        assert post(f"http://127.0.0.1:{server.server_port}", version) == (422, None)
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)

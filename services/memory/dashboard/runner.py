@@ -58,6 +58,8 @@ TERMINAL = ("done", "failed", "killed", "interrupted")
 # suffix sorted them arbitrarily and `latest()` could return the older one.
 _RUN_RE = re.compile(r"run-[0-9]{8}T[0-9]{6}-[0-9]{6}")
 _LOCK = threading.Lock()                    # guards run-record writes only
+_SUPERVISORS_LOCK = threading.Lock()
+_SUPERVISORS = {}                            # (architecture id, run id) -> supervisor thread
 
 
 def _now():
@@ -209,6 +211,22 @@ def active(arch_id):
             _update(arch_id, record["id"], status="interrupted", ended_at=_now(),
                     error="the dashboard restarted while this run was in flight")
     return None
+
+
+def wait_for_supervisors(arch_id, timeout=10):
+    """Wait until every in-process supervisor for an architecture has flushed its terminal record."""
+    deadline = time.monotonic() + timeout
+    while True:
+        with _SUPERVISORS_LOCK:
+            threads = [thread for (owner, _run_id), thread in _SUPERVISORS.items()
+                       if owner == arch_id]
+        if not threads:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        for thread in threads:
+            thread.join(timeout=min(0.05, remaining))
 
 
 def _public(record):
@@ -708,12 +726,22 @@ def start_run(arch_id, api_base="http://localhost:8899", chained=False):
     thread = threading.Thread(target=_supervise, name=f"run:{run_id}",
                               args=(arch_id, run_id, argv, repo, log_path, started),
                               daemon=True)
+    with _SUPERVISORS_LOCK:
+        _SUPERVISORS[(arch_id, run_id)] = thread
     thread.start()
     started.wait(timeout=5)                                  # so the pid is in the reply
     return latest(arch_id) or record
 
 
 def _supervise(arch_id, run_id, argv, repo, log_path, started):
+    try:
+        _supervise_run(arch_id, run_id, argv, repo, log_path, started)
+    finally:
+        with _SUPERVISORS_LOCK:
+            _SUPERVISORS.pop((arch_id, run_id), None)
+
+
+def _supervise_run(arch_id, run_id, argv, repo, log_path, started):
     """Run the process to completion and record how it ended.
 
     Every failure path lands in a status — a run that vanished without a verdict

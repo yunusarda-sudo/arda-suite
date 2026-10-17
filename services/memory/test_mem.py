@@ -211,6 +211,7 @@ class TestMemCLI(unittest.TestCase):
             "dry_run": True,
             "clusters_found": 1,
             "memories_compacted": 1,
+            "would_supersede": 1,
             "syntheses": [
                 {
                     "synthesis": "Consolidated: Use Postgres",
