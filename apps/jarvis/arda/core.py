@@ -789,6 +789,76 @@ class Database:
                 self.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                                   (18, _iso(_utc_now())))
             migrations.append(18)
+        applied = {row[0] for row in self.conn.execute("SELECT version FROM schema_migrations")}
+        if 19 not in applied:
+            with self.transaction():
+                for statement in (
+                    """CREATE TABLE evidence_memories (
+                        record_id TEXT PRIMARY KEY,
+                        project_id TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        source_uri TEXT NOT NULL,
+                        source_sha256 TEXT NOT NULL,
+                        content_sha256 TEXT NOT NULL,
+                        observed_at TEXT NOT NULL,
+                        valid_until TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    )""",
+                    "CREATE INDEX evidence_memories_project_valid_idx ON evidence_memories(project_id, valid_until, created_at)",
+                    """CREATE TRIGGER evidence_memories_no_update
+                        BEFORE UPDATE ON evidence_memories BEGIN
+                        SELECT RAISE(ABORT, 'evidence memories are append-only');
+                    END""",
+                    """CREATE TRIGGER evidence_memories_no_delete
+                        BEFORE DELETE ON evidence_memories BEGIN
+                        SELECT RAISE(ABORT, 'evidence memories are append-only');
+                    END""",
+                ):
+                    self.conn.execute(statement)
+                self.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                                  (19, _iso(_utc_now())))
+            migrations.append(19)
+        applied = {row[0] for row in self.conn.execute("SELECT version FROM schema_migrations")}
+        if 20 not in applied:
+            with self.transaction():
+                for statement in (
+                    """CREATE TABLE model_profile_snapshots (
+                        profile_id TEXT NOT NULL,
+                        version TEXT NOT NULL,
+                        snapshot_hash TEXT NOT NULL,
+                        profile_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY(profile_id, version)
+                    )""",
+                    """CREATE TRIGGER model_profile_snapshots_no_update
+                        BEFORE UPDATE ON model_profile_snapshots BEGIN
+                        SELECT RAISE(ABORT, 'model profile snapshots are append-only');
+                    END""",
+                    """CREATE TRIGGER model_profile_snapshots_no_delete
+                        BEFORE DELETE ON model_profile_snapshots BEGIN
+                        SELECT RAISE(ABORT, 'model profile snapshots are append-only');
+                    END""",
+                    """CREATE TABLE model_route_snapshots (
+                        route_id TEXT NOT NULL,
+                        version TEXT NOT NULL,
+                        snapshot_hash TEXT NOT NULL UNIQUE,
+                        route_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY(route_id, version)
+                    )""",
+                    """CREATE TRIGGER model_route_snapshots_no_update
+                        BEFORE UPDATE ON model_route_snapshots BEGIN
+                        SELECT RAISE(ABORT, 'model route snapshots are append-only');
+                    END""",
+                    """CREATE TRIGGER model_route_snapshots_no_delete
+                        BEFORE DELETE ON model_route_snapshots BEGIN
+                        SELECT RAISE(ABORT, 'model route snapshots are append-only');
+                    END""",
+                ):
+                    self.conn.execute(statement)
+                self.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                                  (20, _iso(_utc_now())))
+            migrations.append(20)
         return migrations
 
 
@@ -1053,6 +1123,7 @@ class JobQueue:
         row = self._verify_lease(job_id, lease_token, ("leased", "running"))
         return {
             "job_id": row["id"],
+            "project_id": row["project_id"],
             "type": row["type"],
             "objective": row["objective"],
             "acceptance_criteria": json.loads(row["acceptance_criteria"]),
