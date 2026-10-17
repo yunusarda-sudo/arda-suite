@@ -44,14 +44,14 @@ The Hermes MCP tool configuration uses a single explicit server with an include 
 ## Verification snapshot (2026-10-17, continued)
 
 - `PASS` — focused lease/cancellation and Hermes sandbox tests after review fixes: **19 passed**.
-- `PASS` — `./.venv/bin/python -m pytest -o addopts='' -q`: **1344 passed, 5 skipped in 43.78s**. The ignored project-local `.venv` was built from `requirements-rpi.txt`. The 5 skipped cases are live Ollama tests because this checkout has no ignored `config.local.yaml`/vault configuration.
+- `PASS` — current PR #7 branch recheck, `./.venv/bin/python -m pytest -o addopts='' -q`: **1344 passed, 5 skipped in 43.07s**. The ignored project-local `.venv` was built from `requirements-rpi.txt`. The 5 skipped cases are live Ollama tests because this checkout has no ignored `config.local.yaml`/vault configuration.
 - `PASS` — `python3 -m py_compile arda/execution.py arda/execution_bridge.py arda/hermes_sandbox.py` and `git diff --check`.
 - `FAIL` — system Python `python3 -m pytest -q` cannot collect the suite because project dependencies (including `numpy`, `ollama`, and `yaml`) are absent from system Python. This is an environment mismatch; the project `.venv` full-suite run above passed.
 - `PASS` — previously missing baseline observer/batch scripts are implemented against their existing tests and documentation; migration assertions now match the current 18 migrations, and the memory test expectation now matches the implemented `default` owner without changing the memory namespace.
-- `PASS` — `./.venv/bin/python -m py_compile arda/*.py scripts/capture_hermes_baseline.py scripts/run_hermes_baseline_batch.py`.
-- `PASS` — `git diff --check`.
-- `BLOCKED` — live Podman/Hermes test: no `podman` or `hermes` CLI is installed; Docker is installed but its daemon socket is absent. No real container, provider call, or sandbox-negative test ran.
-- `BLOCKED` — physical Pi test: Tailscale CLI fails to start, and the `rpi` SSH alias is configured but not reachable/verified. No Pi command or deployment ran.
+- `PASS` — current PR #7 branch recheck, `./.venv/bin/python -m py_compile arda/*.py scripts/capture_hermes_baseline.py scripts/run_hermes_baseline_batch.py` and `git diff --check`.
+- `BLOCKED` — live Podman/Hermes test: on the macOS host, Podman CLI 6.1.4 is installed, but `podman machine list` has no VM and `podman info` cannot connect because the Podman socket is absent. `hermes --version` reports command not found. No real container, provider call, or sandbox-negative test ran in this recheck.
+- `BLOCKED` — physical Pi test: `tailscale status` fails to start with `Tailscale.CLIError error 1`; `ssh -o BatchMode=yes -o ConnectTimeout=5 rpi ...` fails because the hostname cannot be resolved. No Pi command or deployment ran.
+- `PASS` — read-only GitHub status check: PR #7 remains open and draft at `codex/p0a-lease-fenced-acceptance` → `main`; GitHub reports no checks in its status rollup. This does not provide CI or runtime acceptance evidence.
 - `NOT_RUN` — full crash/restart acceptance flow with the new executor against live Podman; host-secret/network/accepted-`.git` denial on a real Linux host. Cancellation marker and MCP/runtime propagation are covered with local test doubles; the physical Podman kill-and-cleanup path is still unverified.
 - `NOT_RUN` — merge, deployment, unattended coding, WP-2 implementation.
 
