@@ -112,4 +112,4 @@ def test_fixture_oracle_evaluation_is_independent_and_persistable(db):
 
 def test_migrations_are_idempotent(db):
     assert db.migrate() == []
-    assert db.scalar("SELECT MAX(version) FROM schema_migrations") == 18
+    assert db.scalar("SELECT MAX(version) FROM schema_migrations") == 24

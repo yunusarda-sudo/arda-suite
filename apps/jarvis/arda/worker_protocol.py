@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import json
+import threading
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -27,6 +28,30 @@ class ProtocolReplayInFlightError(RuntimeError):
 
 class ProtocolUnavailableError(ConnectionError):
     """The transport is unavailable; the request was not delivered."""
+
+
+class WorkerCapabilityError(PermissionError):
+    """A registered worker attempted to claim work outside its declared scope."""
+
+
+class WorkerLeaseLost(RuntimeError):
+    """The worker can no longer prove ownership of its current job lease."""
+
+
+class WorkerCancellationRequested(RuntimeError):
+    """The controller requested a cooperative stop for this worker job."""
+
+
+def _worker_job_types(capabilities_json: str | None) -> tuple[str, ...]:
+    try:
+        capabilities = json.loads(capabilities_json or "[]")
+    except (TypeError, ValueError):
+        return ()
+    if not isinstance(capabilities, list) or not all(isinstance(item, str) for item in capabilities):
+        return ()
+    aliases = {"pytest": "test", "coding": "autonomous-coding"}
+    return tuple(sorted({aliases.get(item, item) for item in capabilities
+                         if item and item != "*" and len(item) <= 128}))
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -101,6 +126,9 @@ class WorkerProtocolServer:
 
         key = f"worker-protocol:{request.worker_id}:{request.request_id}"
         payload_hash = _hash_payload({"type": request.message_type, "payload": request.payload})
+        # The durable replay receipt and its Core mutation share one SQLite
+        # transaction. A process crash before commit rolls both back, so a
+        # retry cannot strand a claim behind a permanent NULL result.
         with self.db.transaction():
             try:
                 self.db.execute(
@@ -118,17 +146,11 @@ class WorkerProtocolServer:
                 if existing["result"] is None:
                     raise ProtocolReplayInFlightError("request is already in flight")
                 return json.loads(existing["result"])
-
-        try:
             response = self._dispatch(request)
-        except Exception:
-            with self.db.transaction():
-                self.db.execute("DELETE FROM idempotency_keys WHERE key=? AND result IS NULL", (key,))
-            raise
-        self.db.execute(
-            "UPDATE idempotency_keys SET result=? WHERE key=? AND operation=? AND result IS NULL",
-            (json.dumps(response, sort_keys=True), key, payload_hash),
-        )
+            self.db.execute(
+                "UPDATE idempotency_keys SET result=? WHERE key=? AND operation=? AND result IS NULL",
+                (json.dumps(response, sort_keys=True), key, payload_hash),
+            )
         return response
 
     def _dispatch(self, request: ProtocolRequest) -> dict[str, Any]:
@@ -137,7 +159,28 @@ class WorkerProtocolServer:
             self.registry.heartbeat(request.worker_id, request.auth_token)
             return {"status": "ok", "worker_id": request.worker_id}
         if request.message_type == "claim":
-            job = self.queue.claim(request.worker_id, job_type=payload.get("job_type"))
+            worker = self.registry.authenticate(request.worker_id, request.auth_token)
+            allowed_types = _worker_job_types(worker["capabilities"])
+            requested_type = payload.get("job_type")
+            if requested_type is not None:
+                if not isinstance(requested_type, str) or requested_type not in allowed_types:
+                    raise WorkerCapabilityError("worker is not authorized for this job type")
+                selected_type = requested_type
+            else:
+                if not allowed_types:
+                    raise WorkerCapabilityError("worker has no claimable job capabilities")
+                placeholders = ",".join("?" for _ in allowed_types)
+                row = self.db.execute(
+                    f"""SELECT type FROM jobs WHERE status='queued' AND available_at <= ?
+                        AND type IN ({placeholders})
+                        ORDER BY CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1
+                        WHEN 'normal' THEN 2 ELSE 3 END, created_at LIMIT 1""",
+                    (_iso(self.clock()), *allowed_types),
+                ).fetchone()
+                if row is None:
+                    raise LookupError("no queued job")
+                selected_type = row["type"]
+            job = self.queue.claim(request.worker_id, job_type=selected_type)
             row = self.db.execute("SELECT * FROM jobs WHERE id=?", (job.id,)).fetchone()
             return {
                 "job_id": job.id,
@@ -154,7 +197,12 @@ class WorkerProtocolServer:
         if request.message_type == "heartbeat":
             job = self.queue.heartbeat(payload["job_id"], payload["lease_token"])
             self.registry.heartbeat(request.worker_id, request.auth_token)
-            return {"job_id": job.id, "status": job.status, "lease_token": job.lease_token}
+            row = self.db.execute("SELECT cancel_requested_at FROM jobs WHERE id=?", (job.id,)).fetchone()
+            return {"job_id": job.id, "status": job.status, "lease_token": job.lease_token,
+                    "cancel_requested": row["cancel_requested_at"] is not None}
+        if request.message_type == "cancel_ack":
+            job = self.queue.acknowledge_cancel(payload["job_id"], payload["lease_token"])
+            return {"job_id": job.id, "status": job.status}
         if request.message_type == "upload_artifact":
             content = base64.b64decode(payload["content_b64"], validate=True)
             artifact_id = self.queue.record_artifact(
@@ -213,3 +261,68 @@ class WorkerProtocolClient:
                 request.payload, request.auth_token, "tampered",
             )
         return self.transport.send(request)
+
+
+class WorkerLeaseGuard:
+    """Renew one active lease and expose fail-closed cancellation to worker code."""
+
+    def __init__(self, client: WorkerProtocolClient, job_id: str, lease_token: str, *,
+                 run_id: str, heartbeat_interval: float = 20.0):
+        if not run_id or heartbeat_interval <= 0:
+            raise ValueError("run_id and positive heartbeat interval are required")
+        self.client = client
+        self.job_id = job_id
+        self.lease_token = lease_token
+        self.run_id = run_id
+        self.heartbeat_interval = heartbeat_interval
+        self.cancel_event = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._error: Exception | None = None
+        self._counter = 0
+        self.cancellation_requested = False
+
+    def start(self) -> "WorkerLeaseGuard":
+        if self._thread is not None:
+            raise RuntimeError("lease guard is already started")
+        self._thread = threading.Thread(target=self._renew, name=f"arda-lease-{self.job_id}", daemon=True)
+        self._thread.start()
+        return self
+
+    def _renew(self) -> None:
+        while not self._stop.wait(self.heartbeat_interval):
+            self._counter += 1
+            try:
+                response = self.client.request(
+                    "heartbeat", {"job_id": self.job_id, "lease_token": self.lease_token},
+                    request_id=f"{self.run_id}:heartbeat:{self._counter}",
+                )
+                if response.get("cancel_requested"):
+                    self.cancellation_requested = True
+                    self.cancel_event.set()
+                    return
+            except Exception as exc:  # noqa: BLE001 - loss must stop publication
+                self._error = exc
+                self.cancel_event.set()
+                return
+
+    def ensure_current(self) -> None:
+        if self.cancel_event.is_set():
+            if self.cancellation_requested:
+                raise WorkerCancellationRequested("controller requested worker cancellation")
+            raise WorkerLeaseLost("worker lease renewal failed; result publication is fenced") from self._error
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(1.0, self.heartbeat_interval + 0.5))
+            if self._thread.is_alive():
+                self.cancel_event.set()
+                self._error = TimeoutError("lease heartbeat thread did not stop")
+
+    def __enter__(self) -> "WorkerLeaseGuard":
+        return self.start()
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self.close()
+        return False

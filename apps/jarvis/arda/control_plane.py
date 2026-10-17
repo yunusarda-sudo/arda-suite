@@ -199,8 +199,19 @@ class ControlPlane:
             db.row_factory = sqlite3.Row
             return [dict(row) for row in db.execute(
                 "SELECT id, project_id, type, objective, status, leased_by, attempt_count, "
+                "cancel_requested_at, "
                 "started_at, finished_at, error, result, created_at, updated_at "
                 "FROM jobs ORDER BY updated_at DESC, id DESC").fetchall()]
+
+    def cancel_job(self, job_id: str, *, requested_by: str = "control-center-operator") -> dict[str, Any]:
+        db = bootstrap_runtime_database(self.db_path)
+        try:
+            job = JobQueue(db).request_cancel(job_id, requested_by=requested_by)
+            row = db.execute("SELECT cancel_requested_at FROM jobs WHERE id=?", (job_id,)).fetchone()
+            return {"job_id": job.id, "status": job.status,
+                    "cancel_requested_at": row["cancel_requested_at"]}
+        finally:
+            db.close()
 
     def enqueue_task(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Validate a UI task contract and place it in the durable queue."""
@@ -433,6 +444,8 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
                 result = self.plane.update_organization_status(path[3], payload["status"], int(payload["expected_version"]))
             elif len(path) == 5 and path[1:3] == ["api", "tasks"] and path[4] == "status":
                 result = self.plane.update_task_status(path[3], payload["status"], int(payload["expected_version"]))
+            elif len(path) == 5 and path[1:3] == ["api", "jobs"] and path[4] == "cancel":
+                result = self.plane.cancel_job(path[3])
             else:
                 self._send({"error": "not found"}, 404)
                 return
@@ -458,7 +471,7 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
 _DASHBOARD_HTML = """<!doctype html><meta charset=utf-8><title>Arda Control Center</title>
 <style>body{font:15px system-ui;margin:2rem;background:#0f172a;color:#e2e8f0}main{max-width:1100px;margin:auto}section{background:#1e293b;border-radius:14px;padding:1rem;margin:1rem 0}pre{white-space:pre-wrap;color:#cbd5e1}h1{color:#f8fafc}button{margin:.25rem;padding:.5rem 1rem;border:0;border-radius:8px}</style>
 <main><h1>Arda Control Center <span id=online>●</span></h1><section><h2>System</h2><pre id=status>Loading…</pre></section><section><h2>Organizations</h2><div id=orgControls></div><pre id=orgs>Loading…</pre><pre id=orgDetail>Loading…</pre></section><section><h2>Tasks</h2><pre id=tasks>Loading…</pre></section><section><h2>Execution Jobs</h2><pre id=jobs>Loading…</pre></section><section><h2>Agents / Memory / Evidence</h2><pre id=ops>Loading…</pre></section></main>
-<script>async function get(p){let r=await fetch(p);return r.json()}async function command(p,b){let r=await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});return r.json()}async function refresh(){try{let [s,o,t,j,a,m,e]=await Promise.all(['/api/status','/api/organizations','/api/tasks','/api/jobs','/api/agents','/api/memory','/api/evidence'].map(get));status.textContent=JSON.stringify(s,null,2);orgs.textContent=JSON.stringify(o,null,2);if(o[0]){let detail=await get('/api/organizations/'+o[0].id);orgDetail.textContent=JSON.stringify(detail,null,2);let p=detail.profile;orgControls.innerHTML='<b>'+o[0].name+' · Autopilot '+(p.autopilot_state||'OFF')+'</b> <button onclick="toggleAuto(\''+o[0].id+'\','+(p.autopilot_enabled?'false':'true')+')">'+(p.autopilot_enabled?'Pause':'Start')+'</button><button onclick="dispatch(\''+o[0].id+'\')">Dispatch next</button>'}tasks.textContent=JSON.stringify(t,null,2);jobs.textContent=JSON.stringify(j,null,2);ops.textContent=JSON.stringify({agents:a,memory:m,evidence:e},null,2);online.textContent='● ONLINE'}catch(e){online.textContent='● OFFLINE'}}async function toggleAuto(id,enabled){await command('/api/organizations/'+id+'/autopilot',{enabled});refresh()}async function dispatch(id){await command('/api/organizations/'+id+'/dispatch',{});refresh()}refresh();setInterval(refresh,5000);</script>"""
+<script>async function get(p){let r=await fetch(p);return r.json()}async function command(p,b){let r=await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});return r.json()}function renderJobs(items){jobs.replaceChildren();for(const item of items){const row=document.createElement('div'),details=document.createElement('pre');details.textContent=JSON.stringify(item,null,2);row.append(details);if(['queued','retry_wait','leased','running'].includes(item.status)){const button=document.createElement('button');button.textContent='Cancel job';button.onclick=()=>cancelJob(item.id);row.append(button)}jobs.append(row)}}async function refresh(){try{let [s,o,t,j,a,m,e]=await Promise.all(['/api/status','/api/organizations','/api/tasks','/api/jobs','/api/agents','/api/memory','/api/evidence'].map(get));status.textContent=JSON.stringify(s,null,2);orgs.textContent=JSON.stringify(o,null,2);if(o[0]){let detail=await get('/api/organizations/'+o[0].id);orgDetail.textContent=JSON.stringify(detail,null,2);let p=detail.profile;orgControls.innerHTML='<b>'+o[0].name+' · Autopilot '+(p.autopilot_state||'OFF')+'</b> <button onclick="toggleAuto(\''+o[0].id+'\','+(p.autopilot_enabled?'false':'true')+')">'+(p.autopilot_enabled?'Pause':'Start')+'</button><button onclick="dispatch(\''+o[0].id+'\')">Dispatch next</button>'}tasks.textContent=JSON.stringify(t,null,2);renderJobs(j);ops.textContent=JSON.stringify({agents:a,memory:m,evidence:e},null,2);online.textContent='● ONLINE'}catch(e){online.textContent='● OFFLINE'}}async function toggleAuto(id,enabled){await command('/api/organizations/'+id+'/autopilot',{enabled});refresh()}async function dispatch(id){await command('/api/organizations/'+id+'/dispatch',{});refresh()}async function cancelJob(id){await command('/api/jobs/'+encodeURIComponent(id)+'/cancel',{});refresh()}refresh();setInterval(refresh,5000);</script>"""
 
 
 def serve(*, host: str = "127.0.0.1", port: int = 8080, db: str | Path | None = None) -> None:

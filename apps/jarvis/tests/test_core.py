@@ -34,7 +34,7 @@ def db(tmp_path):
 def test_migrations_are_idempotent_and_survive_reopen(tmp_path):
     path = tmp_path / "arda.sqlite3"
     first = Database(path)
-    assert first.migrate() == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+    assert first.migrate() == [*range(1, 19), 21, 22, 23, 24]
     assert first.migrate() == []
     first.close()
 
@@ -43,7 +43,7 @@ def test_migrations_are_idempotent_and_survive_reopen(tmp_path):
     assert reopened.table_exists("events")
     assert reopened.table_exists("jobs")
     assert reopened.table_exists("acceptance_intents")
-    assert reopened.scalar("SELECT MAX(version) FROM schema_migrations") == 18
+    assert reopened.scalar("SELECT MAX(version) FROM schema_migrations") == 24
     assert reopened.table_exists("requirement_contract_revisions")
     reopened.close()
 
@@ -54,7 +54,7 @@ def test_runtime_database_bootstrap_uses_versioned_migrations(tmp_path):
     try:
         assert database.path == path
         assert database.table_exists("schema_migrations")
-        assert database.scalar("SELECT MAX(version) FROM schema_migrations") == 18
+        assert database.scalar("SELECT MAX(version) FROM schema_migrations") == 24
     finally:
         database.close()
 

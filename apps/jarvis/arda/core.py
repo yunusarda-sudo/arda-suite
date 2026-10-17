@@ -11,6 +11,7 @@ import json
 import os
 import secrets
 import sqlite3
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -60,20 +61,26 @@ class Database:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.path), timeout=30, isolation_level=None)
+        self._transaction_lock = threading.RLock()
+        self._savepoint_seq = 0
+        self.conn = sqlite3.connect(str(self.path), timeout=30, isolation_level=None,
+                                    check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.execute("PRAGMA busy_timeout = 30000")
 
     def close(self) -> None:
-        self.conn.close()
+        with self._transaction_lock:
+            self.conn.close()
 
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> sqlite3.Cursor:
-        return self.conn.execute(sql, params)
+        with self._transaction_lock:
+            return self.conn.execute(sql, params)
 
     def scalar(self, sql: str, params: tuple[Any, ...] = ()) -> Any:
-        return self.conn.execute(sql, params).fetchone()[0]
+        with self._transaction_lock:
+            return self.conn.execute(sql, params).fetchone()[0]
 
     def table_exists(self, name: str) -> bool:
         return bool(self.scalar(
@@ -789,6 +796,93 @@ class Database:
                 self.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                                   (18, _iso(_utc_now())))
             migrations.append(18)
+        applied = {row[0] for row in self.conn.execute("SELECT version FROM schema_migrations")}
+        if 21 not in applied:
+            with self.transaction():
+                for statement in (
+                    """CREATE TABLE browser_session_grants (
+                        session_id TEXT PRIMARY KEY,
+                        project_id TEXT NOT NULL,
+                        domains_json TEXT NOT NULL,
+                        user_id TEXT NOT NULL,
+                        session_key TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        revoked_at TEXT,
+                        created_by TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1
+                    )""",
+                    "CREATE INDEX browser_session_project_idx ON browser_session_grants(project_id, expires_at)",
+                    """CREATE TRIGGER browser_grants_scope_immutable
+                    BEFORE UPDATE ON browser_session_grants
+                    WHEN NEW.session_id != OLD.session_id
+                      OR NEW.project_id != OLD.project_id
+                      OR NEW.domains_json != OLD.domains_json
+                      OR NEW.user_id != OLD.user_id
+                      OR NEW.session_key != OLD.session_key
+                      OR NEW.created_at != OLD.created_at
+                      OR NEW.expires_at != OLD.expires_at
+                      OR NEW.created_by != OLD.created_by
+                      OR NEW.version != OLD.version + 1
+                      OR OLD.revoked_at IS NOT NULL
+                      OR NEW.revoked_at IS NULL
+                    BEGIN SELECT RAISE(ABORT, 'browser grant scope is immutable'); END""",
+                    """CREATE TRIGGER browser_grants_no_delete BEFORE DELETE ON browser_session_grants
+                    BEGIN SELECT RAISE(ABORT, 'browser grants are durable'); END""",
+                ):
+                    self.conn.execute(statement)
+                self.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                                  (21, _iso(_utc_now())))
+            migrations.append(21)
+        applied = {row[0] for row in self.conn.execute("SELECT version FROM schema_migrations")}
+        if 22 not in applied:
+            with self.transaction():
+                self.conn.execute("ALTER TABLE jobs ADD COLUMN cancel_requested_at TEXT")
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (22, _iso(_utc_now())),
+                )
+            migrations.append(22)
+        applied = {row[0] for row in self.conn.execute("SELECT version FROM schema_migrations")}
+        if 23 not in applied:
+            with self.transaction():
+                self.conn.execute(
+                    """CREATE TABLE browser_session_tabs (
+                        session_id TEXT NOT NULL REFERENCES browser_session_grants(session_id),
+                        tab_id TEXT NOT NULL,
+                        opened_at TEXT NOT NULL,
+                        closed_at TEXT,
+                        close_attempts INTEGER NOT NULL DEFAULT 0,
+                        last_close_error TEXT,
+                        PRIMARY KEY(session_id, tab_id)
+                    )"""
+                )
+                self.conn.execute(
+                    "CREATE INDEX browser_session_open_tabs_idx ON browser_session_tabs(session_id, closed_at)"
+                )
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (23, _iso(_utc_now())),
+                )
+            migrations.append(23)
+        applied = {row[0] for row in self.conn.execute("SELECT version FROM schema_migrations")}
+        if 24 not in applied:
+            with self.transaction():
+                for statement in (
+                    "ALTER TABLE browser_session_grants ADD COLUMN isolated INTEGER NOT NULL DEFAULT 0 CHECK(isolated IN (0, 1))",
+                    """CREATE TABLE browser_session_cleanup (
+                        session_id TEXT PRIMARY KEY REFERENCES browser_session_grants(session_id),
+                        required INTEGER NOT NULL DEFAULT 0 CHECK(required IN (0, 1)),
+                        close_attempts INTEGER NOT NULL DEFAULT 0,
+                        closed_at TEXT,
+                        last_close_error TEXT
+                    )""",
+                    "CREATE INDEX browser_session_cleanup_pending_idx ON browser_session_cleanup(required, closed_at)",
+                ):
+                    self.conn.execute(statement)
+                self.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                                  (24, _iso(_utc_now())))
+            migrations.append(24)
         return migrations
 
 
@@ -814,11 +908,31 @@ class _Transaction:
         self.immediate = immediate
 
     def __enter__(self):
-        self.db.conn.execute("BEGIN IMMEDIATE" if self.immediate else "BEGIN")
+        self.db._transaction_lock.acquire()
+        try:
+            self.nested = self.db.conn.in_transaction
+            if self.nested:
+                self.db._savepoint_seq += 1
+                self.savepoint = f"arda_nested_{self.db._savepoint_seq}"
+                self.db.conn.execute(f"SAVEPOINT {self.savepoint}")
+            else:
+                self.savepoint = None
+                self.db.conn.execute("BEGIN IMMEDIATE" if self.immediate else "BEGIN")
+        except Exception:
+            self.db._transaction_lock.release()
+            raise
         return self.db.conn
 
     def __exit__(self, exc_type, exc, tb):
-        self.db.conn.execute("ROLLBACK" if exc_type else "COMMIT")
+        try:
+            if self.savepoint:
+                if exc_type:
+                    self.db.conn.execute(f"ROLLBACK TO {self.savepoint}")
+                self.db.conn.execute(f"RELEASE {self.savepoint}")
+            else:
+                self.db.conn.execute("ROLLBACK" if exc_type else "COMMIT")
+        finally:
+            self.db._transaction_lock.release()
         return False
 
 
@@ -867,6 +981,7 @@ class Job:
     lease_token: str | None
     leased_by: str | None
     attempt_count: int
+    cancel_requested_at: str | None = None
 
 
 class JobQueue:
@@ -935,20 +1050,27 @@ class JobQueue:
         now_text = _iso(now)
         with self.db.transaction():
             leased = self.db.execute(
-                """UPDATE jobs SET status='queued', leased_by=NULL,
-                    lease_token=NULL, lease_expires_at=NULL, updated_at=?, version=version+1
+                """UPDATE jobs SET status=CASE WHEN cancel_requested_at IS NOT NULL
+                        THEN 'cancelled' ELSE 'queued' END,
+                    error=CASE WHEN cancel_requested_at IS NOT NULL
+                        THEN 'cancelled by operator' ELSE error END,
+                    finished_at=CASE WHEN cancel_requested_at IS NOT NULL THEN ? ELSE finished_at END,
+                    leased_by=NULL, lease_token=NULL, lease_expires_at=NULL, updated_at=?, version=version+1
                     WHERE status='leased' AND lease_expires_at < ?""",
-                (now_text, now_text),
+                (now_text, now_text, now_text),
             ).rowcount
             running = self.db.execute(
-                """UPDATE jobs SET status=CASE WHEN attempt_count < max_attempts
+                """UPDATE jobs SET status=CASE WHEN cancel_requested_at IS NOT NULL
+                    THEN 'cancelled' WHEN attempt_count < max_attempts
                     THEN 'retry_wait' ELSE 'failed' END,
                     available_at=?, leased_by=NULL, lease_token=NULL,
                     lease_expires_at=NULL, updated_at=?, version=version+1,
-                    error=CASE WHEN attempt_count < max_attempts THEN error
+                    finished_at=CASE WHEN cancel_requested_at IS NOT NULL THEN ? ELSE finished_at END,
+                    error=CASE WHEN cancel_requested_at IS NOT NULL THEN 'cancelled by operator'
+                        WHEN attempt_count < max_attempts THEN error
                         ELSE 'maximum attempts exceeded after lease expiry' END
                     WHERE status='running' AND lease_expires_at < ?""",
-                (now_text, now_text, now_text),
+                (now_text, now_text, now_text, now_text),
             ).rowcount
             promoted = self.db.execute(
                 """UPDATE jobs SET status='queued', updated_at=?, version=version+1
@@ -1011,6 +1133,54 @@ class JobQueue:
                 (_iso(expires), _iso(now), job_id, lease_token),
             )
         return self.get(row["id"])
+
+    def request_cancel(self, job_id: str, *, requested_by: str) -> Job:
+        """Request cancellation; active workers retain their lease until they acknowledge."""
+        actor = str(requested_by or "").strip()[:128]
+        if not actor:
+            raise ValueError("requested_by is required")
+        now = _iso(self.clock())
+        with self.db.transaction():
+            row = self.db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            if row["status"] in {"succeeded", "failed", "cancelled"}:
+                return self.get(job_id)
+            if row["status"] in {"queued", "retry_wait"}:
+                self.db.execute(
+                    """UPDATE jobs SET status='cancelled', cancel_requested_at=?, finished_at=?,
+                        error='cancelled by operator', updated_at=?, version=version+1 WHERE id=?""",
+                    (now, now, now, job_id),
+                )
+                event_type = "job.cancelled"
+            elif row["status"] in {"leased", "running"}:
+                self.db.execute(
+                    "UPDATE jobs SET cancel_requested_at=COALESCE(cancel_requested_at, ?), "
+                    "updated_at=?, version=version+1 WHERE id=?",
+                    (now, now, job_id),
+                )
+                event_type = "job.cancel_requested"
+            else:
+                raise ValueError(f"job cannot be cancelled from status {row['status']}")
+            self.events.append(event_type, source="operator", source_id=job_id,
+                               payload={"requested_by": actor})
+        return self.get(job_id)
+
+    def acknowledge_cancel(self, job_id: str, lease_token: str) -> Job:
+        """Finalize a requested cancellation from the worker that owns the lease."""
+        now = _iso(self.clock())
+        with self.db.transaction():
+            row = self._verify_lease(job_id, lease_token, ("leased", "running"))
+            if row["cancel_requested_at"] is None:
+                raise ValueError("job has no pending cancellation request")
+            self.db.execute(
+                """UPDATE jobs SET status='cancelled', error='cancelled by operator', finished_at=?,
+                    updated_at=?, leased_by=NULL, lease_token=NULL, lease_expires_at=NULL,
+                    version=version+1 WHERE id=? AND lease_token=?""",
+                (now, now, job_id, lease_token),
+            )
+            self.events.append("job.cancelled", source="worker", source_id=job_id)
+        return self.get(job_id)
 
     def record_artifact(
         self,
@@ -1108,7 +1278,8 @@ class JobQueue:
 
     def _record(self, row: sqlite3.Row) -> Job:
         return Job(row["id"], row["type"], row["objective"], row["status"],
-                   row["lease_token"], row["leased_by"], row["attempt_count"])
+                   row["lease_token"], row["leased_by"], row["attempt_count"],
+                   row["cancel_requested_at"])
 
     def _verify_lease(self, job_id: str, token: str, statuses: tuple[str, ...]) -> sqlite3.Row:
         row = self.db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()

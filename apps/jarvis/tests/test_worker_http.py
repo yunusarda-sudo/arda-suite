@@ -50,6 +50,18 @@ def _client(server):
     )
 
 
+def test_http_rejects_worker_capability_escalation(db, server):
+    from arda.worker_http import ProtocolTransportError
+
+    job = JobQueue(db).enqueue("autonomous-coding", "must remain queued",
+                               idempotency_key="http-capability-deny")
+    with pytest.raises(ProtocolTransportError) as error:
+        _client(server).request("claim", {"job_type": "autonomous-coding"},
+                                request_id="http-unauthorized-claim")
+    assert error.value.status_code == 403
+    assert JobQueue(db).get(job.id).status == "queued"
+
+
 def test_real_local_http_lifecycle_preserves_core_authority(db, server):
     queue = JobQueue(db)
     job = queue.enqueue("test", "HTTP fixture", idempotency_key="http-lifecycle")
