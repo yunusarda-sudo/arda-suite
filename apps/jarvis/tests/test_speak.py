@@ -38,7 +38,8 @@ def test_render_builds_say_wav_command():
     """_render 'say ... --file-format=WAVE --data-format=LEI16@22050 -o <wav>' kurmalı."""
     proc = MagicMock(returncode=0, stderr=b"")
     fake_wav = (np.ones(50, np.int16), speak._SR)
-    with patch("arda.speak.subprocess.run", return_value=proc) as run, \
+    with patch("arda.platform_runtime.system", return_value="Darwin"), \
+         patch("arda.speak.subprocess.run", return_value=proc) as run, \
          patch("soundfile.read", return_value=fake_wav):
         out = speak._render("Not kaydedildi.", "Yelda")
     cmd = run.call_args.args[0]

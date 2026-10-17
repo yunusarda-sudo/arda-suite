@@ -28,7 +28,9 @@ ARDA already has a loopback-first Control Center, Core diagnostics, a durable jo
 
 - Root `make test` no longer selects system Python implicitly; `make setup-test-env` creates app-specific venvs.
 - Full CI workflow added with read-only repository permission, pinned Actions, Python 3.11, Linux audio libraries, full tests, compilation, `pip check`, shell syntax, and installer safeguards.
+- The first GitHub full-suite run exposed macOS-only expectations in several adapter tests on the Linux runner. Those tests now explicitly select the macOS adapter; Linux command behavior remains covered by dedicated platform-adapter tests. The workflow rerun after this fix is still required.
 - Control Center now has a versioned cancel action for queued and active jobs. The UI confirms cancellation, displays pending cancellation, and creates DOM nodes with `textContent` for organization/job labels.
+- Added `python -m arda.recovery` offline backup, verification, and isolated restore operations. Bundles include a consistent SQLite snapshot plus hashed artifact files; creation requires an explicit stopped-writers assertion and refuses symlinks/special files. `docs/RECOVERY.md` documents stop, rehearsal, and rollback steps. Local recovery tests pass; Pi storage and service-stop rehearsal remains open.
 - POST requests with an `Origin` must match the request `Host`; loopback deployments require a loopback client and loopback Host. Non-loopback bind still uses a shared bearer token and must sit behind an authenticated TLS transport for remote use.
 - WP-2 and WP-4 are separate open draft PRs and are not included in this branch yet. WP-1 physical sandbox/recovery gates and WP-3 live worker/browser gates remain incomplete. Therefore the pilot has not started and this WP is not complete.
 - No external Pi deployment, main merge, or 72-hour run was performed.
@@ -41,5 +43,5 @@ The control action boundary is job cancellation: queued jobs stop immediately; a
 
 - Mission-first joined traceability, approval mutations, per-operator identity, worker health alerts, resource/cost scorecard, and authenticated TLS deployment.
 - Locked/reproducible dependency inputs and a CI run on GitHub.
-- Backup/restore rehearsal and migration rollback check.
+- GitHub full-test workflow run (currently pending at PR #11), Pi backup/restore rehearsal and migration rollback check.
 - WP-1 to WP-4 actual acceptance, physical Raspberry Pi checks, and the instrumented 72-hour pilot.

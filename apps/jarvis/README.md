@@ -101,6 +101,8 @@ Linux/Raspberry Pi'de `daemon` modu systemd kullanıcı servisiyle yönetilir; m
 şablonu yerine [`deploy/jarvis.service`](deploy/jarvis.service) kullanılır. Pi bağımlılıkları
 [`requirements-rpi.txt`](requirements-rpi.txt) dosyasında ayrıdır.
 Dağıtım hedeflerinin özeti için [`docs/release-targets.md`](docs/release-targets.md) belgesine bakın.
+Core durumunun çevrimdışı yedeği ve canlı veriyi değiştirmeyen geri yükleme provası için
+[`docs/RECOVERY.md`](docs/RECOVERY.md) adımlarını izleyin.
 
 Daemon'u login'de otomatik başlatma: `deploy/com.example.jarvis.plist` içindeki
 yönergeleri izle.
