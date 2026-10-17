@@ -253,8 +253,19 @@ class AutonomousDirector:
                 )
         ready_proposals = self.registry.ready_proposals(mission_id)
         blocked_dispatches = 0
+        max_active_jobs = int(mission_data["budget"].get("max_active_jobs", 1))
+        capacity_exhausted = False
         if self.dispatcher is not None:
             for proposal in ready_proposals:
+                active_jobs = self.db.execute(
+                    """SELECT COUNT(*) FROM director_proposals p JOIN jobs j ON j.id=p.job_id
+                       WHERE p.mission_id=? AND p.status='queued'
+                         AND j.status IN ('queued','leased','running')""",
+                    (mission_id,),
+                ).fetchone()[0]
+                if active_jobs >= max_active_jobs:
+                    capacity_exhausted = True
+                    break
                 try:
                     handoff = self.dispatcher(mission_data, dict(proposal))
                     if handoff is None:
@@ -267,14 +278,19 @@ class AutonomousDirector:
                     self.events.append("director.dispatch_failed", project_id=mission["project_id"],
                                        source="director", source_id=proposal["id"],
                                        payload={"error_class": type(exc).__name__})
-        gate_closed = bool(ready_proposals) and (self.dispatcher is None or blocked_dispatches > 0)
+        awaiting_dispatch = self.db.execute(
+            "SELECT COUNT(*) FROM director_proposals WHERE mission_id=? AND status='accepted'",
+            (mission_id,),
+        ).fetchone()[0]
+        gate_closed = awaiting_dispatch > 0 and (self.dispatcher is None or blocked_dispatches > 0)
         reason = ("WP1_EXECUTION_GATE_CLOSED" if gate_closed and "coding.execute" in mission_data["delegated_scopes"]
                   else "MISSION_EXECUTION_SCOPE_NOT_DELEGATED" if gate_closed
+                  else "MISSION_ACTIVE_JOB_BUDGET_EXHAUSTED" if awaiting_dispatch and capacity_exhausted
                   else "SIGNALS_PROCESSED" if observed else "IDLE_NO_SIGNALS")
         return {"state": "BLOCKED" if gate_closed else "ACTIVE" if observed or inserted or proposed or dispatched else "IDLE",
                 "reason": reason,
                 "observed": observed, "inserted": inserted, "proposed": proposed,
-                "dispatched": dispatched, "awaiting_dispatch": len(ready_proposals) - dispatched,
+                "dispatched": dispatched, "awaiting_dispatch": awaiting_dispatch,
                 "reconciled": reconciled}
 
     @staticmethod

@@ -154,6 +154,73 @@ def test_director_discovers_and_dispatches_once_through_core_without_seeded_job(
     db.close()
 
 
+def test_dispatch_respects_mission_active_job_budget_and_resumes_waiting_proposal(tmp_path):
+    db_path = tmp_path / "core.sqlite3"
+    db = bootstrap_runtime_database(db_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)
+    (repo / "README.md").write_text("baseline\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "baseline"], check=True)
+    baseline = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    mission = create_mission(db)
+    now = datetime.now(timezone.utc).isoformat()
+    observations = [
+        SignalObservation("github", f"workflow:{run_id}:attempt:1", "ci.failure", now,
+                          {"repo": "acme/opvia", "run_id": run_id, "conclusion": "failure"})
+        for run_id in (101, 102)
+    ]
+
+    class Observer:
+        def observe(self, _mission):
+            return observations
+
+    class Proposer:
+        def propose(self, _mission, signal):
+            run_id = signal["payload"]["run_id"]
+            return {"repo": "acme/opvia", "objective": f"Repair CI run {run_id}",
+                    "acceptance": ["Configured checks pass"], "allowed_paths": ["src/**"],
+                    "risk": "low", "estimated_cost": 1, "priority": "high",
+                    "rationale": f"Fresh failing workflow run {run_id}.",
+                    "value_score": 90, "feasibility_score": 85}
+
+    dispatcher = CoreProposalDispatcher(
+        ExecutionBridge(db_path, worker_id="director-budget-test"),
+        lambda _repo: {"path": str(repo), "baseline_ref": "refs/heads/main", "baseline_sha": baseline},
+        execution_enabled=True,
+    )
+    director = AutonomousDirector(db, Observer(), Proposer(), dispatcher=dispatcher)
+
+    first = director.run_once(mission["id"])
+    assert first["dispatched"] == 1
+    assert first["awaiting_dispatch"] == 1
+    assert db.scalar("SELECT COUNT(*) FROM jobs") == 1
+    assert sorted(row[0] for row in db.execute("SELECT status FROM director_proposals")) == ["accepted", "queued"]
+
+    waiting = director.run_once(mission["id"])
+    assert waiting["dispatched"] == 0
+    assert waiting["awaiting_dispatch"] == 1
+    assert db.scalar("SELECT COUNT(*) FROM jobs") == 1
+
+    job = JobQueue(db).claim("budget-test-worker")
+    JobQueue(db).start(job.id, job.lease_token)
+    evidence = b"verified candidate"
+    JobQueue(db).record_artifact(job.id, "candidate", "candidate.txt", hashlib.sha256(evidence).hexdigest(),
+                                 content=evidence, lease_token=job.lease_token)
+    JobQueue(db).complete(job.id, job.lease_token, result={"verification": "passed"})
+
+    resumed = director.run_once(mission["id"])
+    assert resumed["reconciled"] == 1
+    assert resumed["dispatched"] == 1
+    assert db.scalar("SELECT COUNT(*) FROM jobs") == 2
+    assert db.scalar("SELECT COUNT(*) FROM director_proposals WHERE status='queued'") == 1
+    assert db.scalar("SELECT COUNT(*) FROM director_proposals WHERE status='verified'") == 1
+    db.close()
+
+
 def test_propose_only_mission_requires_approval_and_low_scores_are_rejected(tmp_path):
     db = bootstrap_runtime_database(tmp_path / "core.sqlite3")
     try:

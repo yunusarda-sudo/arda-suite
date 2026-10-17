@@ -71,7 +71,8 @@ Local service opt-in is not a Pi deployment or unattended coding authorization. 
 
 ## Evidence from this implementation pass
 
-- Focused current integration command: `./.venv/bin/python -m pytest -o addopts='' -q tests/test_autonomous_director.py tests/test_control_plane.py tests/test_scheduler.py tests/test_organization.py tests/test_execution_bridge.py`: **37 passed**. `make compile` and `git diff --check` passed.
+- Focused current integration command: `./.venv/bin/python -m pytest -o addopts='' -q tests/test_autonomous_director.py tests/test_control_plane.py tests/test_scheduler.py tests/test_organization.py tests/test_execution_bridge.py`: **38 passed**. `py_compile` for the Director and its tests plus `git diff --check` passed.
+- `PASS` — regression test for `max_active_jobs`: two simultaneously accepted proposals produce only one active job at capacity 1; the second remains durable and dispatches after the first job completes with a verified artifact.
 - Current broad run excluding two test modules that import absent Hermes scripts and local-only `test_brain.py`: **1,269 passed, 1 failed**. The failure is the known unrelated memory identity expectation (`default` vs `example-user`); it is not changed here.
 - Current unfiltered `make test` is `BLOCKED` at collection by `ModuleNotFoundError` for `scripts.run_hermes_baseline_batch` and `scripts.capture_hermes_baseline`, absent from this checkout.
 - A live unauthenticated read-only scan of public `pallets/flask` successfully fetched issues, PRs, and workflow runs and persisted four normalized signals to a temporary Core database. The latest bounded sample contained no qualifying fresh CI failure, so it correctly generated no proposal and dispatched nothing.
