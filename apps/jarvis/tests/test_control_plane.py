@@ -185,3 +185,49 @@ def test_control_center_rejects_malformed_json_and_non_object_payload(tmp_path):
     finally:
         server.shutdown()
         thread.join(timeout=2)
+
+
+def test_control_center_creates_lists_and_pauses_mission(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    db_path = tmp_path / "core.sqlite3"
+    db = bootstrap_runtime_database(db_path)
+    ProjectRegistry(db).create("sample-project", "Sample Project")
+    db.close()
+    plane = ControlPlane(db_path, evidence_root=tmp_path)
+
+    class Handler(ControlCenterHandler):
+        pass
+    Handler.plane = plane
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    def request(method, path, payload=None):
+        data = json.dumps(payload).encode() if payload is not None else None
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}{path}", data=data,
+            headers={"Content-Type": "application/json"} if data is not None else {}, method=method,
+        )
+        with urllib.request.urlopen(req) as response:
+            return json.load(response)
+
+    try:
+        mission = request("POST", "/api/organizations/sample-project/missions", {
+            "title": "Stabilize", "objective": "Fix fresh CI failures",
+            "acceptance_metrics": ["CI green"], "allowed_repositories": ["acme/opvia"],
+            "delegated_scopes": ["github.read", "coding.propose"],
+            "expires_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        })
+        assert mission["status"] == "active"
+        rows = request("GET", "/api/organizations/sample-project/missions")
+        assert [row["id"] for row in rows] == [mission["id"]]
+        paused = request("POST", f"/api/missions/{mission['id']}/state", {
+            "status": "paused", "expected_version": mission["version"], "reason": "operator pause",
+        })
+        assert paused["status"] == "paused"
+        run = request("POST", f"/api/missions/{mission['id']}/run", {})
+        assert run["reason"] == "DIRECTOR_NOT_CONFIGURED"
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)

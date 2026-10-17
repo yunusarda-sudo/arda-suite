@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import shutil
 import sqlite3
 import subprocess
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -24,10 +26,18 @@ from arda.diagnostics import Diagnostics
 from arda.execution_bridge import ExecutionBridge
 from arda.organization import OrganizationRegistry
 
+log = logging.getLogger(__name__)
+
 
 def _strict_bool(value: Any, field: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"{field} must be a JSON boolean")
+    return value
+
+
+def _strict_int(value: Any, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{field} must be a JSON integer")
     return value
 
 
@@ -37,11 +47,14 @@ def _jsonable(rows: list[Any]) -> list[dict[str, Any]]:
 
 class ControlPlane:
     def __init__(self, db_path: str | Path | None = None, *, evidence_root: str | Path | None = None,
-                 execution_bridge: ExecutionBridge | None = None):
+                 execution_bridge: ExecutionBridge | None = None, director: Any | None = None,
+                 director_runner: Any | None = None):
         self.db_path = Path(db_path or runtime_database_path()).expanduser()
         bootstrap_runtime_database(self.db_path).close()
         self.evidence_root = Path(evidence_root or os.environ.get("ARDA_HARNESS_ROOT", "~/.arda/harness")).expanduser()
         self.execution_bridge = execution_bridge or ExecutionBridge(self.db_path)
+        self.director = director
+        self.director_runner = director_runner
 
     def _read(self) -> Diagnostics:
         return Diagnostics(self.db_path)
@@ -183,6 +196,105 @@ class ControlPlane:
                 depends_on=tuple(str(value) for value in payload.get("depends_on", []))))
         finally:
             db.close()
+
+    def create_mission(self, project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        required = {"title", "objective", "acceptance_metrics", "allowed_repositories", "expires_at"}
+        missing = sorted(required - payload.keys())
+        if missing:
+            raise ValueError(f"missing mission fields: {', '.join(missing)}")
+        for field in ("acceptance_metrics", "allowed_repositories", "allowed_domains",
+                      "delegated_scopes", "allowed_risks"):
+            if field in payload and not isinstance(payload[field], list):
+                raise ValueError(f"{field} must be an array")
+        if "budget" in payload and not isinstance(payload["budget"], dict):
+            raise ValueError("budget must be an object")
+        db = bootstrap_runtime_database(self.db_path)
+        try:
+            row = OrganizationRegistry(db).create_mission(
+                project_id, payload["title"], payload["objective"],
+                acceptance_metrics=tuple(payload["acceptance_metrics"]),
+                allowed_repositories=tuple(payload["allowed_repositories"]),
+                allowed_domains=tuple(payload.get("allowed_domains", ())),
+                delegated_scopes=tuple(payload.get("delegated_scopes", ())),
+                allowed_risks=tuple(payload.get("allowed_risks", ("low",))),
+                budget=payload.get("budget"), expires_at=payload["expires_at"],
+                mission_id=payload.get("id"),
+            )
+            return self._mission_json(row)
+        finally:
+            db.close()
+
+    def mission(self, mission_id: str) -> dict[str, Any]:
+        db = bootstrap_runtime_database(self.db_path)
+        try:
+            registry = OrganizationRegistry(db)
+            row = registry.mission(mission_id)
+            result = self._mission_json(row)
+            result["proposals"] = [dict(item) for item in db.execute(
+                "SELECT * FROM director_proposals WHERE mission_id=? ORDER BY created_at DESC, id DESC",
+                (mission_id,),
+            ).fetchall()]
+            return result
+        finally:
+            db.close()
+
+    def missions(self, project_id: str) -> list[dict[str, Any]]:
+        db = bootstrap_runtime_database(self.db_path)
+        try:
+            if db.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone() is None:
+                raise KeyError(project_id)
+            rows = db.execute(
+                "SELECT id FROM organization_missions WHERE project_id=? ORDER BY created_at, id",
+                (project_id,),
+            ).fetchall()
+        finally:
+            db.close()
+        return [self.mission(row["id"]) for row in rows]
+
+    def set_mission_state(self, mission_id: str, status: str, expected_version: int,
+                          reason: str = "") -> dict[str, Any]:
+        db = bootstrap_runtime_database(self.db_path)
+        try:
+            row = OrganizationRegistry(db).set_mission_state(
+                mission_id, status, expected_version=expected_version, reason=reason)
+            return self._mission_json(row)
+        finally:
+            db.close()
+
+    def approve_proposal(self, proposal_id: str, expected_version: int) -> dict[str, Any]:
+        db = bootstrap_runtime_database(self.db_path)
+        try:
+            return dict(OrganizationRegistry(db).approve_proposal(
+                proposal_id, expected_version=expected_version, actor="control-center-authenticated"))
+        finally:
+            db.close()
+
+    def reject_proposal(self, proposal_id: str, expected_version: int, reason: str) -> dict[str, Any]:
+        db = bootstrap_runtime_database(self.db_path)
+        try:
+            return dict(OrganizationRegistry(db).reject_proposal(
+                proposal_id, expected_version=expected_version, reason=reason))
+        finally:
+            db.close()
+
+    def run_director_once(self, mission_id: str) -> dict[str, Any]:
+        if self.director is None and self.director_runner is not None:
+            return self.director_runner(mission_id)
+        if self.director is None:
+            return {"state": "BLOCKED", "reason": "DIRECTOR_NOT_CONFIGURED"}
+        return self.director.run_once(mission_id)
+
+    @staticmethod
+    def _mission_json(row: Any) -> dict[str, Any]:
+        result = dict(row)
+        for target, source in (("acceptance_metrics", "acceptance_metrics_json"),
+                               ("allowed_repositories", "allowed_repositories_json"),
+                               ("allowed_domains", "allowed_domains_json"),
+                               ("delegated_scopes", "delegated_scopes_json"),
+                               ("allowed_risks", "allowed_risks_json"),
+                               ("budget", "budget_json")):
+            result[target] = json.loads(result.pop(source))
+        return result
 
     def tasks(self) -> list[dict[str, Any]]:
         if not self.db_path.exists():
@@ -383,6 +495,24 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
                 except Exception:
                     self._send({"error": "control plane unavailable"}, 500)
                 return
+            if len(parts) == 5 and parts[4] == "missions":
+                try:
+                    self._send(self.plane.missions(parts[3]))
+                except KeyError:
+                    self._send({"error": "organization unavailable"}, 404)
+                except Exception:
+                    self._send({"error": "control plane unavailable"}, 500)
+                return
+        if path.startswith("/api/missions/"):
+            parts = path.split("/")
+            if len(parts) == 4 and parts[3]:
+                try:
+                    self._send(self.plane.mission(parts[3]))
+                except KeyError:
+                    self._send({"error": "mission unavailable"}, 404)
+                except Exception:
+                    self._send({"error": "control plane unavailable"}, 500)
+                return
         if path == "/":
             self._send(_DASHBOARD_HTML, content_type="text/html")
             return
@@ -423,6 +553,8 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
                 result = self.plane.update_organization_profile(path[3], payload)
             elif len(path) == 5 and path[1:3] == ["api", "organizations"] and path[4] == "objectives":
                 result = self.plane.create_organization_objective(path[3], payload)
+            elif len(path) == 5 and path[1:3] == ["api", "organizations"] and path[4] == "missions":
+                result = self.plane.create_mission(path[3], payload)
             elif len(path) == 5 and path[1:3] == ["api", "organizations"] and path[4] == "autopilot":
                 result = self.plane.set_autopilot(path[3], _strict_bool(payload["enabled"], "enabled"))
             elif len(path) == 5 and path[1:3] == ["api", "organizations"] and path[4] == "dispatch":
@@ -433,6 +565,18 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
                 result = self.plane.update_organization_status(path[3], payload["status"], int(payload["expected_version"]))
             elif len(path) == 5 and path[1:3] == ["api", "tasks"] and path[4] == "status":
                 result = self.plane.update_task_status(path[3], payload["status"], int(payload["expected_version"]))
+            elif len(path) == 5 and path[1:3] == ["api", "missions"] and path[4] == "state":
+                result = self.plane.set_mission_state(path[3], payload["status"],
+                                                      _strict_int(payload["expected_version"], "expected_version"),
+                                                      payload.get("reason", ""))
+            elif len(path) == 5 and path[1:3] == ["api", "missions"] and path[4] == "run":
+                result = self.plane.run_director_once(path[3])
+            elif len(path) == 5 and path[1:3] == ["api", "proposals"] and path[4] == "approve":
+                result = self.plane.approve_proposal(
+                    path[3], _strict_int(payload["expected_version"], "expected_version"))
+            elif len(path) == 5 and path[1:3] == ["api", "proposals"] and path[4] == "reject":
+                result = self.plane.reject_proposal(
+                    path[3], _strict_int(payload["expected_version"], "expected_version"), payload["reason"])
             else:
                 self._send({"error": "not found"}, 404)
                 return
@@ -464,11 +608,64 @@ _DASHBOARD_HTML = """<!doctype html><meta charset=utf-8><title>Arda Control Cent
 def serve(*, host: str = "127.0.0.1", port: int = 8080, db: str | Path | None = None) -> None:
     if host not in {"127.0.0.1", "::1", "localhost"} and not os.environ.get("ARDA_CONTROL_TOKEN"):
         raise RuntimeError("ARDA_CONTROL_TOKEN is required for non-loopback Control Plane binding")
-    plane = ControlPlane(db)
+    db_path = Path(db or runtime_database_path()).expanduser()
+    director_enabled = os.environ.get("ARDA_DIRECTOR_ENABLED", "0").strip().lower() in {"1", "true", "yes"}
+    director_runner = None
+    stop_scheduler = threading.Event()
+    scheduler_thread = None
+    if director_enabled:
+        from arda.autonomous_director import AutonomousDirector, CiFailureProposalGenerator, GitHubProjectObserver
+        from arda.core import bootstrap_runtime_database
+        from arda.github_adapter import GitHubReadOnlyAdapter
+        from arda.scheduler import Scheduler
+
+        token = os.environ.get("ARDA_GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN")
+
+        def make_director(database):
+            return AutonomousDirector(
+                database, GitHubProjectObserver(GitHubReadOnlyAdapter(token=token)),
+                CiFailureProposalGenerator(),
+            )
+
+        def run_director_once(mission_id: str) -> dict[str, Any]:
+            database = bootstrap_runtime_database(db_path)
+            try:
+                return make_director(database).run_once(mission_id)
+            finally:
+                database.close()
+
+        def run_scheduler() -> None:
+            while not stop_scheduler.is_set():
+                database = None
+                try:
+                    database = bootstrap_runtime_database(db_path)
+                    scheduler = Scheduler(database, director=make_director(database))
+                    scheduler.install_defaults()
+                    scheduler.reconcile_ticks()
+                    scheduler.run_due()
+                except Exception:
+                    # Durable scheduler tick records hold detailed failures; the service stays alive.
+                    log.exception("Autonomous Director scheduler loop failed")
+                finally:
+                    if database is not None:
+                        database.close()
+                stop_scheduler.wait(5)
+
+        director_runner = run_director_once
+        scheduler_thread = threading.Thread(target=run_scheduler, name="arda-director-scheduler", daemon=True)
+        scheduler_thread.start()
+    plane = ControlPlane(db_path, director_runner=director_runner)
     class Handler(ControlCenterHandler):
         pass
     Handler.plane = plane
-    ThreadingHTTPServer((host, port), Handler).serve_forever()
+    server = ThreadingHTTPServer((host, port), Handler)
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+        stop_scheduler.set()
+        if scheduler_thread is not None:
+            scheduler_thread.join(timeout=10)
 
 
 def main(argv: list[str] | None = None) -> int:

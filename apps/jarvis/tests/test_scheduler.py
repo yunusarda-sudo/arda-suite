@@ -29,7 +29,7 @@ def seed_project(db, *, project_id="sample-project", updated_at="2026-10-01T00:0
 def test_scheduler_migration_is_idempotent(tmp_path):
     path = tmp_path / "migration.sqlite3"
     first = Database(path)
-    assert first.migrate() == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    assert first.migrate() == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     assert first.migrate() == []
     assert first.table_exists("schedules")
     assert first.table_exists("scheduler_ticks")
@@ -130,3 +130,40 @@ def test_optional_github_sync_runs_as_durable_schedule(db):
 
     assert calls == [("sample-project", "acme/sample-project")]
     assert db.scalar("SELECT COUNT(*) FROM scheduler_ticks WHERE schedule_id='github_sync'") == 1
+
+
+def test_director_runs_only_active_missions_from_durable_schedule(db):
+    from datetime import datetime, timedelta, timezone
+
+    from arda.awareness import ProjectRegistry
+    from arda.organization import OrganizationRegistry
+
+    now = datetime.now(timezone.utc)
+    project_id = ProjectRegistry(db).create("director-project", "Director Project")["id"]
+    registry = OrganizationRegistry(db, clock=lambda: now)
+    active = registry.create_mission(
+        project_id, "Active", "Discover work", acceptance_metrics=("verified",),
+        allowed_repositories=("acme/repo",), delegated_scopes=("github.read", "coding.propose"),
+        expires_at=(now + timedelta(days=1)).isoformat(), mission_id="MISSION-ACTIVE",
+    )
+    paused = registry.create_mission(
+        project_id, "Paused", "Do nothing", acceptance_metrics=("verified",),
+        allowed_repositories=("acme/repo",), delegated_scopes=("github.read", "coding.propose"),
+        expires_at=(now + timedelta(days=1)).isoformat(), mission_id="MISSION-PAUSED",
+    )
+    registry.set_mission_state(paused["id"], "paused", expected_version=paused["version"], reason="operator")
+
+    class FakeDirector:
+        calls = []
+
+        def run_once(self, mission_id):
+            self.calls.append(mission_id)
+            return {"state": "IDLE", "reason": "NO_SIGNALS"}
+
+    director = FakeDirector()
+    scheduler = Scheduler(db, clock=lambda: now, director=director)
+    scheduler.install_defaults(run_immediately=True)
+    scheduler.run_due(now=now)
+
+    assert director.calls == [active["id"]]
+    assert db.scalar("SELECT COUNT(*) FROM scheduler_ticks WHERE schedule_id='director_tick' AND status='succeeded'") == 1
