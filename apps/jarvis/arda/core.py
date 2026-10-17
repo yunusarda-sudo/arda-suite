@@ -865,6 +865,24 @@ class Database:
                     (23, _iso(_utc_now())),
                 )
             migrations.append(23)
+        applied = {row[0] for row in self.conn.execute("SELECT version FROM schema_migrations")}
+        if 24 not in applied:
+            with self.transaction():
+                for statement in (
+                    "ALTER TABLE browser_session_grants ADD COLUMN isolated INTEGER NOT NULL DEFAULT 0 CHECK(isolated IN (0, 1))",
+                    """CREATE TABLE browser_session_cleanup (
+                        session_id TEXT PRIMARY KEY REFERENCES browser_session_grants(session_id),
+                        required INTEGER NOT NULL DEFAULT 0 CHECK(required IN (0, 1)),
+                        close_attempts INTEGER NOT NULL DEFAULT 0,
+                        closed_at TEXT,
+                        last_close_error TEXT
+                    )""",
+                    "CREATE INDEX browser_session_cleanup_pending_idx ON browser_session_cleanup(required, closed_at)",
+                ):
+                    self.conn.execute(statement)
+                self.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                                  (24, _iso(_utc_now())))
+            migrations.append(24)
         return migrations
 
 

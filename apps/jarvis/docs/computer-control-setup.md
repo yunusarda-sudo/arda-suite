@@ -19,7 +19,8 @@ Tam otonom (onaysız) İSTEMEDİK — yanlış bir transkripsiyon/yorum geri al�
 
 ## Proje kapsamlı, süreli browser oturumu
 
-Camofox oturumu artık tek bir global `jarvis` profiline bağlanmamalı. Browser araçları
+Camofox oturumu artık tek bir global `jarvis` profiline bağlanmamalı. Yeni Core grant'leri
+birbirinden ayrı, grant kimliğinden türetilmiş kalıcı Camofox profili alır. Browser araçları
 yalnızca Core'da proje kimliği, açık domain listesi, oluşturma zamanı ve sona erme zamanı
 bulunan bir grant ile çalışır. Grant geri alınabilir ve domain listesi sonradan değiştirilemez.
 Grant yoksa browser health dışındaki işlemler fail-closed olur.
@@ -56,18 +57,25 @@ finally:
     db.close()
 ```
 
-Sonraki browser araç çağrısı reddedilir. ARDA açtığı Camofox sekmelerini Core SQLite'ta
-grant'e bağlı olarak kaydeder; run sonunda kapatmayı dener. Grant iptal edildiyse veya
-süresi dolduysa sonraki browser aracı önce kalan sekmeleri kapatmayı dener. Camofox
-ulaşılamazsa browser kullanımı fail-closed kalır ve close kaydı sonraki çağrıda yeniden
-denenir. Bu, browser sürecini sonlandırmaz ve fiziksel egress izolasyonu sağlamaz; gerçek
-unattended kullanım için process supervisor ile OS/container egress firewall hâlâ gerekir.
+Sonraki browser araç çağrısı reddedilir. ARDA browser isteğinden önce grant'e ait oturum
+temizleme niyetini Core SQLite'a yazar; açılan sekmeler de grant'e bağlı kaydedilir. Grant
+iptal edildiyse veya süresi dolduysa sonraki browser aracı, yalnız bu grant'in izole
+profilini sıfırlayıp canlı oturumu kapatmayı dener. Camofox ulaşılamazsa cleanup kaydı
+kalıcı olarak beklemede kalır ve browser kullanımı fail-closed olur; sonraki çağrıda yeniden
+denenir. Eski sürümlerdeki proje ortak profilleri otomatik olarak sıfırlanmaz.
+
+Oturum sıfırlama, Camofox'un `DELETE /sessions/:userId/storage_state` API davranışını kullanır;
+bu endpoint'in canlı oturumu kapatıp saklanan browser durumunu sildiği upstream dokümanda
+belirtilmiştir: [Camofox session persistence](https://github.com/jo-inc/camofox-browser#session-persistence).
+Bu repo yerel HTTP test doubles ile istemci sözleşmesini doğrular; canlı Camofox'a karşı
+çalıştırma veya Raspberry Pi üzerinde süreç kapatma kanıtı yoktur.
 
 Domain allowlist'i uygulama katmanında ilk URL'yi doğrular ve navigasyon/snapshot sonunda
 gözlenen URL'yi tekrar denetler. Tarayıcı redirect'i yanıt alınmadan önce izlemiş olabilir;
 bu nedenle bu kontrol egress sandbox'ı değildir. Dış sitelerle unattended kullanım için
 Camofox worker'ının kendisi redirect/DNS-rebinding dahil network egress ACL'li izole bir
-host/container içinde çalışmalı. Bu repo kodu o fiziksel ağ izolasyonunu kurmuş veya
+host/container içinde çalışmalı. Camofox proxy profili yalnızca trafik rotasını seçer; tek
+başına grant'in domain ACL'sini zorlamaz. Bu repo kodu fiziksel ağ izolasyonunu kurmuş veya
 doğrulamış sayılmaz.
 
 ## macOS izinleri (UI otomasyonu için ŞART)

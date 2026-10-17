@@ -160,6 +160,14 @@ class CamofoxClient:
         if status != 404 and not 200 <= status < 300:
             raise BrowserError(f"Camofox tab close failed with HTTP {status}")
 
+    def clear_session_storage(self, *, user_id: str) -> None:
+        """Close one grant-owned live session and clear its persisted browser state."""
+        status, _raw, _content_type = self._request(
+            "DELETE", f"/sessions/{quote(user_id, safe='')}/storage_state"
+        )
+        if not 200 <= status < 300:
+            raise BrowserError(f"Camofox session reset failed with HTTP {status}")
+
 
 def validate_public_url(url: str) -> str:
     return _public_destination(url)

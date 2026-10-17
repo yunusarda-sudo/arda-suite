@@ -84,6 +84,18 @@ def test_close_tab_only_records_success_or_already_closed():
         failed.close_tab(user_id="project-a", tab_id="tab-a")
 
 
+def test_session_reset_closes_and_clears_only_the_selected_profile():
+    client, calls = _client([_Response(b"", status=204)])
+    client.clear_session_storage(user_id="arda-grant-a1b2")
+    request, _timeout = calls[0]
+    assert request.method == "DELETE"
+    assert request.full_url.endswith("/sessions/arda-grant-a1b2/storage_state")
+
+    unavailable, _calls = _client([_Response(b"not supported", status=404)])
+    with pytest.raises(BrowserError, match="session reset failed with HTTP 404"):
+        unavailable.clear_session_storage(user_id="arda-grant-a1b2")
+
+
 def test_browser_navigation_rejects_observed_unscoped_redirect(monkeypatch):
     import arda.browser_adapter as adapter
     monkeypatch.setattr(adapter.socket, "getaddrinfo", lambda *args, **kwargs: [
