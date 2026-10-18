@@ -84,15 +84,15 @@ def test_real_work_promotes_only_pass_and_stores_lesson(tmp_path):
 
     assert outcome.result is WorkResult.PASS
     assert outcome.attempts == 2
-    assert outcome.accepted_sha
-    assert subprocess.check_output(["git", "rev-parse", "arda/harness-v1"], cwd=repo, text=True).strip() == outcome.accepted_sha
+    assert outcome.candidate_sha
+    assert subprocess.check_output(["git", "rev-parse", "arda/harness-v1"], cwd=repo, text=True).strip() == sha
     assert memory.recalled and memory.stored == []
     assert list((tmp_path / "memory-jobs").glob("*.json"))
     import sqlite3
     with sqlite3.connect(tmp_path / "episodes.sqlite3") as db:
         row = db.execute("SELECT result, accepted_sha, memory_refs FROM episodes").fetchone()
     assert row[0] == "PASS"
-    assert row[1] == outcome.accepted_sha
+    assert row[1] is None
     assert row[2] == "[]"
     assert Path(outcome.artifact_path).exists()
     assert not list((tmp_path / "worktrees").glob("task-001-*"))
@@ -184,10 +184,43 @@ def test_evaluator_changes_outside_allowlist_cannot_be_promoted(tmp_path, tracke
     assert evaluator.calls == passing_attempt
     assert agent.repairs == passing_attempt - 1
     assert outcome.result is WorkResult.FAIL
-    assert outcome.accepted_sha is None
+    assert outcome.candidate_sha is None
     assert subprocess.check_output(
         ["git", "rev-parse", "arda/harness-v1"], cwd=repo, text=True,
     ).strip() == sha
     evidence = json.loads(Path(outcome.artifact_path).read_text(encoding="utf-8"))
     assert unexpected_path in evidence["changed_paths"]
     assert evidence["accepted_sha"] is None
+    assert evidence["candidate_sha"] is None
+
+
+def test_cleanup_failure_cannot_leave_pass_evidence_or_episode(tmp_path, monkeypatch):
+    import sqlite3
+    from arda.autonomous_work_loop import GitWorktree
+
+    repo, sha = _repo(tmp_path)
+    subprocess.run(["git", "branch", "arda/harness-v1", sha], cwd=repo, check=True)
+    harness = RealWorkHarness(
+        repo=repo, accepted_ref="arda/harness-v1", workspace_root=tmp_path / "worktrees",
+        artifact_root=tmp_path / "artifacts", episode_db=tmp_path / "episodes.sqlite3",
+        agent=Agent(), evaluator=Evaluator(),
+    )
+    task = WorkTask("task-cleanup", str(repo), "main", sha, "change source", ("passes",),
+                    allowed_paths=("source.txt",))
+
+    def fail_cleanup(*_args, **_kwargs):
+        raise OSError("cleanup failed")
+
+    monkeypatch.setattr(GitWorktree, "remove", fail_cleanup)
+    outcome = harness.run([task])[0]
+
+    evidence = json.loads(Path(outcome.artifact_path).read_text(encoding="utf-8"))
+    with sqlite3.connect(tmp_path / "episodes.sqlite3") as db:
+        row = db.execute("SELECT result, accepted_sha FROM episodes").fetchone()
+    assert outcome.result is WorkResult.INVALID
+    assert outcome.candidate_sha is None
+    assert evidence["result"] == WorkResult.INVALID.value
+    assert evidence["reason"] == "cleanup failed"
+    assert evidence["candidate_sha"] is None
+    assert row == (WorkResult.INVALID.value, None)
+    assert subprocess.check_output(["git", "rev-parse", "arda/harness-v1"], cwd=repo, text=True).strip() == sha

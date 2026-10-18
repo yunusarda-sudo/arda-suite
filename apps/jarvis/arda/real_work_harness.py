@@ -60,7 +60,7 @@ class RealWorkOutcome:
     result: WorkResult
     attempts: int
     baseline_sha: str
-    accepted_sha: str | None
+    candidate_sha: str | None
     failure_class: str | None
     artifact_path: str
     memory_ref: str | None
@@ -157,7 +157,7 @@ class RealWorkHarness:
         changed: list[str] = []
         result = WorkResult.INVALID
         reason = "not_started"
-        accepted_sha: str | None = None
+        candidate_sha: str | None = None
         try:
             workspace = worktree.create(task)
             validity = self._check_validity(task, workspace)
@@ -197,41 +197,43 @@ class RealWorkHarness:
                         result = WorkResult.FAIL
                         reason = scope
                     else:
-                        accepted_sha = self._accept(task, workspace)
+                        candidate_sha = self._candidate(task, workspace)
         except Exception as exc:
             reason = str(exc)
             result = WorkResult.INVALID
         finally:
-            payload = {"schema": "arda-real-work-v1", "episode_id": episode, "task": task.canonical(),
-                       "result": result.value, "reason": reason, "attempts": attempts,
-                       "changed_paths": changed, "recalled_lessons": recalled,
-                       "agent_reports": agent_reports, "evaluation": evaluation.__dict__ if evaluation else None,
-                       "validity": validity.__dict__ if validity else None,
-                       "accepted_sha": accepted_sha}
-            artifact = task_dir / "evidence.json"
-            artifact.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
             if workspace is not None:
                 try:
                     worktree.remove(self.repo, workspace)
                 except Exception:
                     result = WorkResult.INVALID
                     reason = "cleanup failed"
-            # Episode truth is committed before memory. Memory is explicitly a
-            # post-processing sidecar: a slow/failed extractor can never erase
-            # a result, block baseline promotion, or block the next task.
+                    candidate_sha = None
+            finished = _now()
+            payload = {"schema": "arda-real-work-v1", "episode_id": episode, "task": task.canonical(),
+                       "result": result.value, "reason": reason, "attempts": attempts,
+                       "started_at": started, "finished_at": finished,
+                       "changed_paths": changed, "recalled_lessons": recalled,
+                       "agent_reports": agent_reports, "evaluation": evaluation.__dict__ if evaluation else None,
+                       "validity": validity.__dict__ if validity else None,
+                       "candidate_sha": candidate_sha, "accepted_sha": None}
+            artifact = task_dir / f"evidence-{episode}.json"
+            artifact.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+            # Candidate evidence is independent of acceptance. Core persists
+            # the accepted SHA after its lease-fenced Git/SQLite protocol.
             lesson = {"task_id": task.task_id, "repo": self.repo.name,
                       "task_type": task.task_type, "result": result.value,
                       "failure_class": reason, "repair": attempts > 1,
                       "verification": evaluation.__dict__ if evaluation else None,
-                      "accepted_commit": accepted_sha}
+                      "candidate_commit": candidate_sha}
             self.episodes.write({"episode_id": episode, "task_id": task.task_id, "repo": str(self.repo),
                 "baseline_sha": task.baseline_sha, "provider": task.provider, "model": task.model,
-                "reasoning": task.reasoning, "started_at": started, "finished_at": _now(),
+                "reasoning": task.reasoning, "started_at": started, "finished_at": finished,
                 "attempts": attempts, "result": result.value, "failure_class": None if result is WorkResult.PASS else reason,
                 "verification_result": json.dumps(evaluation.__dict__ if evaluation else {}, default=str),
-                "accepted_sha": accepted_sha, "artifact_path": str(artifact), "memory_refs": []})
+                "accepted_sha": None, "artifact_path": str(artifact), "memory_refs": []})
             self._enqueue_memory_job(episode, lesson)
-        return RealWorkOutcome(task.task_id, result, attempts, task.baseline_sha, accepted_sha,
+        return RealWorkOutcome(task.task_id, result, attempts, task.baseline_sha, candidate_sha,
                                None if result is WorkResult.PASS else reason, str(artifact), None)
 
     def _check_validity(self, task: WorkTask, workspace: Path) -> TaskValidityReport:
@@ -257,7 +259,7 @@ class RealWorkHarness:
     def reconcile_artifacts(self) -> int:
         """Rebuild missing episode rows and enqueue missing memory sidecars."""
         repaired = 0
-        for artifact in sorted(self.artifact_root.glob("TASK-*/evidence.json")):
+        for artifact in sorted(self.artifact_root.glob("TASK-*/evidence-*.json")):
             payload = json.loads(artifact.read_text(encoding="utf-8"))
             episode_id = payload["episode_id"]
             task = payload["task"]
@@ -279,14 +281,11 @@ class RealWorkHarness:
                 self._enqueue_memory_job(episode_id, lesson)
         return repaired
 
-    def _accept(self, task: WorkTask, workspace: Path) -> str:
+    def _candidate(self, task: WorkTask, workspace: Path) -> str:
         subprocess.run(["git", "add", "--all"], cwd=workspace, check=True)
         subprocess.run(["git", "commit", "-m", f"harness: accept {task.task_id}"], cwd=workspace, check=True,
                        capture_output=True, text=True)
-        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=workspace, text=True).strip()
-        subprocess.run(["git", "branch", "-f", self.accepted_ref, sha], cwd=self.repo, check=True,
-                       capture_output=True, text=True)
-        return sha
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=workspace, text=True).strip()
 
     @staticmethod
     def _changed(workspace: Path) -> list[str]:
