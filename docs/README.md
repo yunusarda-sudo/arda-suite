@@ -14,6 +14,8 @@ environments and service lifecycles.
   data ownership, and deployment/migration limits.
 - [Security policy](../SECURITY.md): private vulnerability reporting,
   authentication, network boundaries, and data excluded from public reports.
+- [Contributing guidelines](../CONTRIBUTING.md): principles, branching conventions,
+  local verification, and Pull Request submission workflows.
 
 ## Jarvis and ARDA Core
 
