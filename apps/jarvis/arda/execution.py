@@ -380,12 +380,13 @@ class PodmanRuntime:
     @staticmethod
     def _artifacts(scratch: Path, expected: Sequence[str]) -> tuple[dict[str, str], str | None]:
         found: dict[str, str] = {}
+        scratch_resolved = scratch.resolve()
         for relative in expected:
             path = scratch / relative
             resolved = path.resolve()
             if not path.exists():
                 return found, "artifact_missing"
-            if scratch not in resolved.parents or not path.is_file() or path.is_symlink():
+            if scratch_resolved not in resolved.parents or not path.is_file() or path.is_symlink():
                 return found, "artifact_boundary_violation"
             found[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
         return found, None
