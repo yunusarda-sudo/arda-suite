@@ -186,7 +186,7 @@ def test_p04_codex_success_parse(tmp_path):
 def test_p04_codex_success_parse_usage_estimator(tmp_path):
     parsed = parse_codex(
         RecordedOutput(argv=(), exit_code=0, stdout=_CODEX_SUCCESS),
-        usage_estimator=lambda tokens: tokens * 1e-6,
+        usage_estimator=lambda tokens: sum(tokens.values()) * 1e-6,
     )
     assert parsed.observation.usage is not None
     assert not math.isnan(parsed.observation.usage)
@@ -294,6 +294,57 @@ def test_p12_supported_provider_catalogue():
         assert provider in PROVIDER_ADAPTERS
 
 
+def test_p12_codex_usage_full_token_taxonomy(tmp_path):
+    stream = "\n".join(
+        [
+            json.dumps({"type": "turn.started"}),
+            json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {
+                        "input_tokens": 10,
+                        "cached_input_tokens": 5,
+                        "cache_write_input_tokens": 2,
+                        "output_tokens": 3,
+                        "reasoning_output_tokens": 4,
+                    },
+                }
+            ),
+        ]
+    )
+    captured: list[dict] = []
+    parsed = parse_codex(
+        RecordedOutput(argv=(), exit_code=0, stdout=stream),
+        usage_estimator=lambda usage: (
+            captured.append(dict(usage)) or float(sum(usage.values()))
+        ),
+    )
+    assert captured == [
+        {
+            "input_tokens": 10,
+            "cached_input_tokens": 5,
+            "cache_write_input_tokens": 2,
+            "output_tokens": 3,
+            "reasoning_output_tokens": 4,
+        }
+    ]
+    assert parsed.observation.usage == 24.0
+
+
+def test_p12_codex_no_model_event_observed_empty(tmp_path):
+    stream = "\n".join(
+        [
+            json.dumps({"type": "thread.started", "thread_id": "th-x"}),
+            json.dumps({"type": "turn.started"}),
+            json.dumps(
+                {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}}
+            ),
+        ]
+    )
+    parsed = parse_codex(RecordedOutput(argv=(), exit_code=0, stdout=stream))
+    assert parsed.observed_model == ""
+
+
 # --------------------------------------------------------------------------
 # Controller integration: Phase0Controller + CLI adapter (fixture runner)
 # --------------------------------------------------------------------------
@@ -353,7 +404,7 @@ def test_p09_controller_reconciles_paid_cli_usage(tmp_path):
         RecordedOutput(argv=(), exit_code=0, stdout=_CODEX_SUCCESS)
     )
     adapter = phase0_cli_adapter(
-        CODEX_ADAPTER, runner, allow_paid=True, argv_options={"parser_options": {"usage_estimator": lambda tokens: tokens * 1e-6}}
+        CODEX_ADAPTER, runner, allow_paid=True, argv_options={"parser_options": {"usage_estimator": lambda tokens: sum(tokens.values()) * 1e-6}}
     )
     task = _task(tmp_path, paid=True, cap=1.0, attempt_budget=0.5)
     outcome = controller.run(task, adapter=adapter, acceptance=acceptance_ok)

@@ -264,13 +264,34 @@ def _model_from_item(envelope: Mapping[str, Any]) -> str | None:
     return None
 
 
+_USAGE_TOKEN_KEYS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+)
+
+
+def _usage_dict(payload: Any) -> dict[str, int]:
+    """Normalize a provider usage payload onto the token taxonomy.
+
+    codex Usage schema (verified against codex-rs exec_events.rs): input,
+    cached_input, cache_write_input, output, reasoning_output tokens.
+    """
+    if not isinstance(payload, Mapping):
+        return {}
+    return {key: _count(payload.get(key)) for key in _USAGE_TOKEN_KEYS}
+
+
 def _token_usage(payload: Any) -> int | None:
-    total = _count(payload.get("input_tokens")) + _count(payload.get("output_tokens"))
-    return total or None
+    return sum(_usage_dict(payload).values()) or None
 
 
 def parse_codex(
-    result: RecordedOutput, *, usage_estimator: Callable[[int], float | None] | None = None
+    result: RecordedOutput,
+    *,
+    usage_estimator: Callable[[dict[str, int]], float | None] | None = None,
 ) -> ParsedAttempt:
     if result.timed_out:
         return ParsedAttempt(_timed_out_observation(), 0, "", "")
@@ -287,10 +308,9 @@ def parse_codex(
             if isinstance(candidate, str) and candidate:
                 observed_model = candidate
         if envelope.get("type") == "turn.completed":
-            tokens = envelope.get("usage", {})
-            total = _count(tokens.get("input_tokens")) + _count(tokens.get("output_tokens"))
+            tokens = _usage_dict(envelope.get("usage", {}))
             if callable(usage_estimator):
-                usage = usage_estimator(total)
+                usage = usage_estimator(tokens)
         if envelope.get("type") == "turn.failed":
             error = envelope.get("error", {})
             description = error.get("message", "") if isinstance(error, Mapping) else str(error)
@@ -330,7 +350,9 @@ def parse_claude(result: RecordedOutput) -> ParsedAttempt:
 
 
 def parse_opencode(
-    result: RecordedOutput, *, usage_estimator: Callable[[int], float | None] | None = None
+    result: RecordedOutput,
+    *,
+    usage_estimator: Callable[[dict[str, int]], float | None] | None = None,
 ) -> ParsedAttempt:
     if result.timed_out:
         return ParsedAttempt(_timed_out_observation(), 0, "", "")
@@ -342,7 +364,7 @@ def parse_opencode(
         )
     provider_requests = 0
     cost_total: float | None = None
-    token_total: int | None = None
+    tokens_total: dict[str, int] = {}
     observed_model = ""
     for envelope in envelopes:
         if envelope.get("type") == "step-finish":
@@ -352,19 +374,20 @@ def parse_opencode(
                 cost_total = (cost_total or 0.0) + cost
             tokens = envelope.get("tokens")
             if isinstance(tokens, Mapping):
-                rendered = _count(tokens.get("input")) + _count(tokens.get("output"))
-                token_total = (token_total or 0) + rendered
+                for key in ("input", "output"):
+                    rendered = _count(tokens.get(key))
+                    tokens_total[f"{key}_tokens"] = (
+                        tokens_total.get(f"{key}_tokens", 0) + rendered
+                    )
         for candidate in (envelope.get("model"), _model_from_item(envelope)):
             if isinstance(candidate, str) and candidate:
                 observed_model = candidate
     if not provider_requests:
         return _lost(result, "opencode output had no step-finish events")
-    if callable(usage_estimator) and token_total:
-        usage = usage_estimator(token_total)
-    elif cost_total is not None:
-        usage = cost_total
+    if callable(usage_estimator) and tokens_total:
+        usage = usage_estimator(tokens_total)
     else:
-        usage = None
+        usage = cost_total
     return _finish(
         result,
         provider_requests=provider_requests,
