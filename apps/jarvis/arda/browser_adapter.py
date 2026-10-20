@@ -53,6 +53,10 @@ class CamofoxClient:
     api_key: str = ""
     timeout: float = 15.0
     request_fn: object | None = None
+    egress_proxy_host: str = ""
+    egress_proxy_port: int = 3129
+    require_egress_proxy: bool = False
+    required_camofox_version: str = "2.4.8"
 
     def __post_init__(self) -> None:
         parsed = urlparse(self.base_url.rstrip("/"))
@@ -60,8 +64,18 @@ class CamofoxClient:
             raise ValueError("Camofox base URL geçersiz")
         if self.timeout <= 0 or self.timeout > 60:
             raise ValueError("Camofox timeout 0 ile 60 saniye arasında olmalı")
+        if not 1 <= self.egress_proxy_port <= 65535:
+            raise ValueError("Browser egress proxy port geçersiz")
+        self.egress_proxy_host = self.egress_proxy_host.strip()
+        self.required_camofox_version = self.required_camofox_version.strip()
+        if self.require_egress_proxy and not self.egress_proxy_host:
+            # Fail at construction so a required boundary cannot degrade to direct egress.
+            raise ValueError("Browser grant egress proxy gerekli ama host tanımlı değil")
+        if self.require_egress_proxy and not self.required_camofox_version:
+            raise ValueError("Browser grant egress için sabit Camofox sürümü gerekli")
 
-    def _request(self, method: str, path: str, *, query: dict | None = None, body: dict | None = None):
+    def _request(self, method: str, path: str, *, query: dict | None = None, body: dict | None = None,
+                 allow_http_errors: tuple[int, ...] = ()):
         url = self.base_url.rstrip("/") + path
         if query:
             url += "?" + urlencode(query)
@@ -79,6 +93,10 @@ class CamofoxClient:
             raw = response.read()
             return getattr(response, "status", 200), raw, response.headers.get_content_type()
         except HTTPError as exc:
+            if exc.code in allow_http_errors:
+                content_type = exc.headers.get_content_type() if exc.headers else ""
+                exc.read(512)
+                return exc.code, b"", content_type
             detail = exc.read(512).decode("utf-8", "replace")
             raise BrowserError(f"Camofox HTTP {exc.code}: {detail[:240]}") from exc
         except (URLError, TimeoutError, OSError) as exc:
@@ -99,9 +117,30 @@ class CamofoxClient:
     def health(self) -> dict:
         return self._json("GET", "/health")
 
+    def _assert_egress_proxy_api(self) -> None:
+        health = self.health()
+        if health.get("version") != self.required_camofox_version:
+            raise BrowserError(
+                "Camofox egress proxy API sürümü doğrulanamadı; "
+                f"beklenen {self.required_camofox_version}, alınan {health.get('version') or 'bilinmiyor'}"
+            )
+
     def create_tab(self, *, user_id: str, session_key: str, url: str | None = None,
-                   allowed_domains: tuple[str, ...] | list[str] = ()) -> dict:
+                   allowed_domains: tuple[str, ...] | list[str] = (), grant_token: str = "") -> dict:
         body = {"userId": user_id, "sessionKey": session_key}
+        if self.require_egress_proxy and not self.egress_proxy_host:
+            raise BrowserError("Grant domain ACL için egress proxy yapılandırılmamış")
+        if self.egress_proxy_host:
+            if not user_id or not grant_token:
+                raise BrowserError("Grant egress proxy kimliği eksik")
+            if self.require_egress_proxy:
+                self._assert_egress_proxy_api()
+            body["proxy"] = {
+                "host": self.egress_proxy_host,
+                "port": self.egress_proxy_port,
+                "username": user_id,
+                "password": grant_token,
+            }
         if url:
             body["url"] = _scoped_destination(url, allowed_domains)
         value = self._json("POST", "/tabs", body=body)
@@ -148,7 +187,20 @@ class CamofoxClient:
         return raw
 
     def close_tab(self, *, user_id: str, tab_id: str) -> None:
-        self._request("DELETE", f"/tabs/{quote(tab_id, safe='')}", query={"userId": user_id})
+        status, _raw, _content_type = self._request(
+            "DELETE", f"/tabs/{quote(tab_id, safe='')}", query={"userId": user_id},
+            allow_http_errors=(404,),
+        )
+        if status != 404 and not 200 <= status < 300:
+            raise BrowserError(f"Camofox tab close failed with HTTP {status}")
+
+    def clear_session_storage(self, *, user_id: str) -> None:
+        """Close one grant-owned live session and clear its persisted browser state."""
+        status, _raw, _content_type = self._request(
+            "DELETE", f"/sessions/{quote(user_id, safe='')}/storage_state"
+        )
+        if not 200 <= status < 300:
+            raise BrowserError(f"Camofox session reset failed with HTTP {status}")
 
 
 def validate_public_url(url: str) -> str:

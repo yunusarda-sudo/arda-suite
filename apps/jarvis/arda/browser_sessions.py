@@ -71,14 +71,16 @@ class BrowserSessionRegistry:
             raise ValueError("session_id has an invalid format")
         now = self.clock()
         expires = now + timedelta(seconds=ttl_seconds)
-        profile = "arda-project-" + hashlib.sha256(project_id.encode("utf-8")).hexdigest()[:20]
+        # A grant owns a separate persistent browser identity. This lets revoke/expiry
+        # close and clear exactly that profile without touching another grant's state.
+        profile = "arda-grant-" + hashlib.sha256(identifier.encode("utf-8")).hexdigest()[:20]
         session_key = "arda-" + hashlib.sha256(project_id.encode("utf-8")).hexdigest()[:20] + "-" + uuid.uuid4().hex
         with self.db.transaction():
             self.db.execute(
                 """INSERT INTO browser_session_grants(
                     session_id, project_id, domains_json, user_id, session_key,
-                    created_at, expires_at, revoked_at, created_by
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
+                    created_at, expires_at, revoked_at, created_by, isolated
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, 1)""",
                 (identifier, project_id, json.dumps(domains), profile, session_key,
                  _iso(now), _iso(expires), created_by),
             )
@@ -95,18 +97,29 @@ class BrowserSessionRegistry:
         return {**dict(row), "domains": tuple(json.loads(row["domains_json"]))}
 
     def authorize(self, session_id: str, project_id: str, *, url: str | None = None) -> dict:
-        grant = self.get(session_id)
-        now = _iso(self.clock())
-        if grant["project_id"] != project_id:
-            raise BrowserGrantError("browser session belongs to another project")
-        if grant["revoked_at"] is not None:
-            raise BrowserGrantError("browser session is revoked")
-        if grant["expires_at"] <= now:
-            raise BrowserGrantError("browser session has expired")
-        if url:
-            parsed = urlparse(url)
-            if parsed.scheme not in {"http", "https"} or not parsed.hostname or not host_in_scope(parsed.hostname, grant["domains"]):
-                raise BrowserGrantError("URL is outside the delegated browser domain scope")
+        with self.db.transaction():
+            grant = self.get(session_id)
+            now = _iso(self.clock())
+            if grant["project_id"] != project_id:
+                raise BrowserGrantError("browser session belongs to another project")
+            if grant["revoked_at"] is not None:
+                raise BrowserGrantError("browser session is revoked")
+            if grant["expires_at"] <= now:
+                raise BrowserGrantError("browser session has expired")
+            if url:
+                parsed = urlparse(url)
+                if parsed.scheme not in {"http", "https"} or not parsed.hostname or not host_in_scope(parsed.hostname, grant["domains"]):
+                    raise BrowserGrantError("URL is outside the delegated browser domain scope")
+            if grant["isolated"]:
+                # Persist cleanup intent before the external browser call. If the request
+                # succeeds and Core crashes before recording a tab ID, recovery still
+                # knows which isolated profile must be reset after revoke/expiry.
+                self.db.execute(
+                    """INSERT INTO browser_session_cleanup(session_id, required)
+                       VALUES (?, 1) ON CONFLICT(session_id) DO UPDATE SET
+                         required=1, closed_at=NULL, last_close_error=NULL""",
+                    (session_id,),
+                )
         return {"session_id": session_id, "project_id": project_id,
                 "user_id": grant["user_id"], "session_key": grant["session_key"],
                 "allowed_domains": grant["domains"], "expires_at": grant["expires_at"]}
@@ -124,3 +137,149 @@ class BrowserSessionRegistry:
                                    project_id=grant["project_id"],
                                    payload={"revoked_by": str(revoked_by)[:128]})
         return self.get(session_id)
+
+    def track_tab(self, session_id: str, project_id: str, tab_id: str) -> None:
+        """Persist an opened Camofox tab, including one racing with revocation."""
+        tab_id = str(tab_id or "").strip()
+        if not tab_id or len(tab_id) > 256 or any(ord(char) < 32 for char in tab_id):
+            raise ValueError("browser tab id is invalid")
+        now = _iso(self.clock())
+        with self.db.transaction():
+            grant = self.db.execute(
+                "SELECT project_id, isolated FROM browser_session_grants WHERE session_id=?", (session_id,)
+            ).fetchone()
+            if grant is None or grant["project_id"] != project_id:
+                raise BrowserGrantError("browser tab does not match its session project")
+            self.db.execute(
+                """INSERT INTO browser_session_tabs(session_id, tab_id, opened_at)
+                   VALUES (?, ?, ?) ON CONFLICT(session_id, tab_id) DO NOTHING""",
+                (session_id, tab_id, now),
+            )
+            if grant["isolated"]:
+                self.db.execute(
+                    """INSERT INTO browser_session_cleanup(session_id, required)
+                       VALUES (?, 1) ON CONFLICT(session_id) DO UPDATE SET
+                         required=1, closed_at=NULL, last_close_error=NULL""",
+                    (session_id,),
+                )
+
+    def pending_close_tabs(self, *, session_id: str | None = None) -> list[dict]:
+        now = _iso(self.clock())
+        where = "t.closed_at IS NULL AND g.isolated=0 AND (g.revoked_at IS NOT NULL OR g.expires_at <= ?)"
+        params: list[object] = [now]
+        if session_id is not None:
+            where += " AND t.session_id=?"
+            params.append(session_id)
+        rows = self.db.execute(
+            f"""SELECT t.session_id, t.tab_id, t.close_attempts, g.user_id
+                FROM browser_session_tabs t JOIN browser_session_grants g USING(session_id)
+                WHERE {where} ORDER BY t.opened_at, t.tab_id LIMIT 8""",
+            tuple(params),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def pending_close_count(self, *, session_id: str | None = None) -> int:
+        now = _iso(self.clock())
+        where = "t.closed_at IS NULL AND g.isolated=0 AND (g.revoked_at IS NOT NULL OR g.expires_at <= ?)"
+        params: list[object] = [now]
+        if session_id is not None:
+            where += " AND t.session_id=?"
+            params.append(session_id)
+        row = self.db.execute(
+            f"""SELECT COUNT(*) FROM browser_session_tabs t
+                JOIN browser_session_grants g USING(session_id) WHERE {where}""",
+            tuple(params),
+        ).fetchone()
+        return int(row[0])
+
+    def pending_session_cleanup(self, *, session_id: str | None = None) -> list[dict]:
+        now = _iso(self.clock())
+        where = "g.isolated=1 AND c.required=1 AND c.closed_at IS NULL AND (g.revoked_at IS NOT NULL OR g.expires_at <= ?)"
+        params: list[object] = [now]
+        if session_id is not None:
+            where += " AND g.session_id=?"
+            params.append(session_id)
+        rows = self.db.execute(
+            f"""SELECT g.session_id, g.user_id FROM browser_session_grants g
+                JOIN browser_session_cleanup c USING(session_id)
+                WHERE {where} ORDER BY g.created_at, g.session_id LIMIT 8""",
+            tuple(params),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def pending_session_cleanup_count(self, *, session_id: str | None = None) -> int:
+        now = _iso(self.clock())
+        where = "g.isolated=1 AND c.required=1 AND c.closed_at IS NULL AND (g.revoked_at IS NOT NULL OR g.expires_at <= ?)"
+        params: list[object] = [now]
+        if session_id is not None:
+            where += " AND g.session_id=?"
+            params.append(session_id)
+        row = self.db.execute(
+            f"""SELECT COUNT(*) FROM browser_session_grants g
+                JOIN browser_session_cleanup c USING(session_id) WHERE {where}""",
+            tuple(params),
+        ).fetchone()
+        return int(row[0])
+
+    def record_session_cleanup(self, session_id: str, *, error_class: str | None = None) -> None:
+        now = _iso(self.clock())
+        with self.db.transaction():
+            self.db.execute(
+                """INSERT INTO browser_session_cleanup(session_id, required, close_attempts, closed_at, last_close_error)
+                   VALUES (?, 1, 1, ?, ?)
+                   ON CONFLICT(session_id) DO UPDATE SET
+                     required=1, close_attempts=close_attempts+1,
+                     closed_at=excluded.closed_at, last_close_error=excluded.last_close_error""",
+                (session_id, None if error_class else now, str(error_class)[:80] if error_class else None),
+            )
+
+    def record_all_tabs_closed(self, session_id: str) -> int:
+        now = _iso(self.clock())
+        with self.db.transaction():
+            cursor = self.db.execute(
+                """UPDATE browser_session_tabs
+                   SET closed_at=COALESCE(closed_at, ?), close_attempts=close_attempts+1,
+                       last_close_error=NULL
+                   WHERE session_id=? AND closed_at IS NULL""",
+                (now, session_id),
+            )
+        return cursor.rowcount
+
+    def record_tab_close(self, session_id: str, tab_id: str, *, error_class: str | None = None) -> None:
+        now = _iso(self.clock())
+        closed_at = None if error_class else now
+        with self.db.transaction():
+            self.db.execute(
+                """UPDATE browser_session_tabs
+                   SET closed_at=COALESCE(?, closed_at), close_attempts=close_attempts+1,
+                       last_close_error=?
+                   WHERE session_id=? AND tab_id=? AND closed_at IS NULL""",
+                (closed_at, str(error_class)[:80] if error_class else None, session_id, tab_id),
+            )
+
+
+def close_revoked_browser_tabs(registry: BrowserSessionRegistry, client, *,
+                               session_id: str | None = None) -> dict[str, int]:
+    """Idempotently clear isolated sessions and close legacy tabs for revoked grants."""
+    closed = failed = 0
+    for session in registry.pending_session_cleanup(session_id=session_id):
+        try:
+            client.clear_session_storage(user_id=session["user_id"])
+        except Exception as exc:  # noqa: BLE001 - retain a retryable durable session cleanup receipt
+            registry.record_session_cleanup(session["session_id"], error_class=type(exc).__name__)
+            failed += 1
+        else:
+            closed += registry.record_all_tabs_closed(session["session_id"])
+            registry.record_session_cleanup(session["session_id"])
+    for tab in registry.pending_close_tabs(session_id=session_id):
+        try:
+            client.close_tab(user_id=tab["user_id"], tab_id=tab["tab_id"])
+        except Exception as exc:  # noqa: BLE001 - preserve a retryable durable close receipt
+            registry.record_tab_close(tab["session_id"], tab["tab_id"], error_class=type(exc).__name__)
+            failed += 1
+        else:
+            registry.record_tab_close(tab["session_id"], tab["tab_id"])
+            closed += 1
+    return {"closed": closed, "failed": failed,
+            "pending": registry.pending_close_count(session_id=session_id)
+                       + registry.pending_session_cleanup_count(session_id=session_id)}

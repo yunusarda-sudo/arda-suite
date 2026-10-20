@@ -843,6 +843,46 @@ class Database:
                     (22, _iso(_utc_now())),
                 )
             migrations.append(22)
+        applied = {row[0] for row in self.conn.execute("SELECT version FROM schema_migrations")}
+        if 23 not in applied:
+            with self.transaction():
+                self.conn.execute(
+                    """CREATE TABLE browser_session_tabs (
+                        session_id TEXT NOT NULL REFERENCES browser_session_grants(session_id),
+                        tab_id TEXT NOT NULL,
+                        opened_at TEXT NOT NULL,
+                        closed_at TEXT,
+                        close_attempts INTEGER NOT NULL DEFAULT 0,
+                        last_close_error TEXT,
+                        PRIMARY KEY(session_id, tab_id)
+                    )"""
+                )
+                self.conn.execute(
+                    "CREATE INDEX browser_session_open_tabs_idx ON browser_session_tabs(session_id, closed_at)"
+                )
+                self.conn.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (23, _iso(_utc_now())),
+                )
+            migrations.append(23)
+        applied = {row[0] for row in self.conn.execute("SELECT version FROM schema_migrations")}
+        if 24 not in applied:
+            with self.transaction():
+                for statement in (
+                    "ALTER TABLE browser_session_grants ADD COLUMN isolated INTEGER NOT NULL DEFAULT 0 CHECK(isolated IN (0, 1))",
+                    """CREATE TABLE browser_session_cleanup (
+                        session_id TEXT PRIMARY KEY REFERENCES browser_session_grants(session_id),
+                        required INTEGER NOT NULL DEFAULT 0 CHECK(required IN (0, 1)),
+                        close_attempts INTEGER NOT NULL DEFAULT 0,
+                        closed_at TEXT,
+                        last_close_error TEXT
+                    )""",
+                    "CREATE INDEX browser_session_cleanup_pending_idx ON browser_session_cleanup(required, closed_at)",
+                ):
+                    self.conn.execute(statement)
+                self.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                                  (24, _iso(_utc_now())))
+            migrations.append(24)
         return migrations
 
 
@@ -941,6 +981,7 @@ class Job:
     lease_token: str | None
     leased_by: str | None
     attempt_count: int
+    cancel_requested_at: str | None = None
 
 
 class JobQueue:
@@ -1009,20 +1050,27 @@ class JobQueue:
         now_text = _iso(now)
         with self.db.transaction():
             leased = self.db.execute(
-                """UPDATE jobs SET status='queued', leased_by=NULL,
-                    lease_token=NULL, lease_expires_at=NULL, updated_at=?, version=version+1
+                """UPDATE jobs SET status=CASE WHEN cancel_requested_at IS NOT NULL
+                        THEN 'cancelled' ELSE 'queued' END,
+                    error=CASE WHEN cancel_requested_at IS NOT NULL
+                        THEN 'cancelled by operator' ELSE error END,
+                    finished_at=CASE WHEN cancel_requested_at IS NOT NULL THEN ? ELSE finished_at END,
+                    leased_by=NULL, lease_token=NULL, lease_expires_at=NULL, updated_at=?, version=version+1
                     WHERE status='leased' AND lease_expires_at < ?""",
-                (now_text, now_text),
+                (now_text, now_text, now_text),
             ).rowcount
             running = self.db.execute(
-                """UPDATE jobs SET status=CASE WHEN attempt_count < max_attempts
+                """UPDATE jobs SET status=CASE WHEN cancel_requested_at IS NOT NULL
+                    THEN 'cancelled' WHEN attempt_count < max_attempts
                     THEN 'retry_wait' ELSE 'failed' END,
                     available_at=?, leased_by=NULL, lease_token=NULL,
                     lease_expires_at=NULL, updated_at=?, version=version+1,
-                    error=CASE WHEN attempt_count < max_attempts THEN error
+                    finished_at=CASE WHEN cancel_requested_at IS NOT NULL THEN ? ELSE finished_at END,
+                    error=CASE WHEN cancel_requested_at IS NOT NULL THEN 'cancelled by operator'
+                        WHEN attempt_count < max_attempts THEN error
                         ELSE 'maximum attempts exceeded after lease expiry' END
                     WHERE status='running' AND lease_expires_at < ?""",
-                (now_text, now_text, now_text),
+                (now_text, now_text, now_text, now_text),
             ).rowcount
             promoted = self.db.execute(
                 """UPDATE jobs SET status='queued', updated_at=?, version=version+1
@@ -1233,7 +1281,8 @@ class JobQueue:
 
     def _record(self, row: sqlite3.Row) -> Job:
         return Job(row["id"], row["type"], row["objective"], row["status"],
-                   row["lease_token"], row["leased_by"], row["attempt_count"])
+                   row["lease_token"], row["leased_by"], row["attempt_count"],
+                   row["cancel_requested_at"])
 
     def _verify_lease(self, job_id: str, token: str, statuses: tuple[str, ...]) -> sqlite3.Row:
         row = self.db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()

@@ -17,7 +17,7 @@ from typing import Any, Protocol
 from arda.acceptance import AcceptanceCoordinator
 from arda.autonomous_work_loop import WorkResult, WorkTask
 from arda.awareness import TaskStore
-from arda.core import Database, EventLog, Job, JobQueue, _iso, _utc_now, bootstrap_runtime_database
+from arda.core import Database, EventLog, Job, JobQueue, StaleLeaseError, _iso, _utc_now, bootstrap_runtime_database
 from arda.organization import OrganizationRegistry
 
 
@@ -155,6 +155,8 @@ class ExecutionBridge:
         try:
             queue = JobQueue(db, lease_seconds=self.lease_seconds)
             AcceptanceCoordinator(db, lease_seconds=self.lease_seconds).reconcile()
+            queue.reconcile_expired()
+            self._reconcile_cancelled_tasks(db)
             try:
                 job = queue.claim(self.worker_id, job_type=self.JOB_TYPE)
             except LookupError:
@@ -186,10 +188,10 @@ class ExecutionBridge:
                 payload={"job_id": job.id, "worker_id": self.worker_id, "attempt": job.attempt_count},
             )
             heartbeat_stop = threading.Event()
-            lease_lost = threading.Event()
+            execution_cancel = threading.Event()
             heartbeat_thread = threading.Thread(
                 target=self._heartbeat_until_done,
-                args=(job.id, token, heartbeat_stop, lease_lost),
+                args=(job.id, token, heartbeat_stop, execution_cancel),
                 daemon=True,
             )
             heartbeat_thread.start()
@@ -197,9 +199,12 @@ class ExecutionBridge:
                 if self.executor is None:
                     raise RuntimeError("no task executor configured")
                 cancellable = getattr(self.executor, "execute_cancellable", None)
-                result = cancellable(task, lease_lost) if callable(cancellable) else self.executor.execute(task)
+                result = cancellable(task, execution_cancel) if callable(cancellable) else self.executor.execute(task)
             except Exception as exc:  # noqa: BLE001 - boundary must persist failure
                 heartbeat_stop.set()
+                heartbeat_thread.join(timeout=1)
+                if self._ack_cancel_if_requested(db, queue, task_store, task, job.id, token):
+                    return BridgeRun(job.id, task.task_id, "CANCELLED", "cancelled")
                 error = f"executor failure: {type(exc).__name__}"
                 self._mark_failed(db, queue, task_store, task, task_row, job.id, token, error)
                 EventLog(db).append(
@@ -211,6 +216,9 @@ class ExecutionBridge:
             finally:
                 heartbeat_stop.set()
                 heartbeat_thread.join(timeout=1)
+
+            if self._ack_cancel_if_requested(db, queue, task_store, task, job.id, token):
+                return BridgeRun(job.id, task.task_id, "CANCELLED", "cancelled")
 
             payload = result.payload()
             payload["accepted_sha"] = None  # only the Core coordinator may assert acceptance
@@ -251,6 +259,8 @@ class ExecutionBridge:
                     task_store.update_status(task.task_id, terminal_status, expected_version=task_row["version"])
                     queue.fail(job.id, token, error=result.reason or result.result, retryable=False)
             except Exception as exc:  # noqa: BLE001 - persist a safe terminal failure
+                if self._ack_cancel_if_requested(db, queue, task_store, task, job.id, token):
+                    return BridgeRun(job.id, task.task_id, "CANCELLED", "cancelled")
                 error = f"persistence failure: {type(exc).__name__}"
                 self._mark_failed(db, queue, task_store, task, task_row, job.id, token, error)
                 return BridgeRun(job.id, task.task_id, WorkResult.INVALID.value, "blocked")
@@ -268,17 +278,73 @@ class ExecutionBridge:
     def _job_payload(job: Job) -> dict[str, Any]:
         return {"id": job.id, "type": job.type, "objective": job.objective,
                 "status": job.status,
-                "leased_by": job.leased_by, "attempt_count": job.attempt_count}
+                "leased_by": job.leased_by, "attempt_count": job.attempt_count,
+                "cancel_requested_at": job.cancel_requested_at}
 
     def _heartbeat_until_done(self, job_id: str, lease_token: str, stop: threading.Event,
-                              lease_lost: threading.Event) -> None:
+                              execution_cancel: threading.Event) -> None:
         interval = max(1.0, self.lease_seconds / 3)
         while not stop.wait(interval):
             try:
-                self.heartbeat(job_id, lease_token)
+                status = self.heartbeat(job_id, lease_token)
+                if status.get("cancel_requested_at"):
+                    execution_cancel.set()
+                    return
             except Exception:
-                lease_lost.set()
+                execution_cancel.set()
                 return
+
+    @staticmethod
+    def _ack_cancel_if_requested(db: Database, queue: JobQueue, task_store: TaskStore,
+                                 task: WorkTask, job_id: str, token: str) -> bool:
+        """Finalize operator cancellation only while this worker still owns the lease."""
+        try:
+            with db.transaction():
+                row = db.execute(
+                    "SELECT status, lease_token, cancel_requested_at FROM jobs WHERE id=?", (job_id,)
+                ).fetchone()
+                if (row is None or row["cancel_requested_at"] is None
+                        or row["status"] not in {"leased", "running"} or row["lease_token"] != token):
+                    return False
+                queue.acknowledge_cancel(job_id, token)
+                current = task_store.get(task.task_id)
+                if current["status"] not in {"done", "cancelled", "blocked"}:
+                    task_store.update_status(task.task_id, "cancelled", expected_version=current["version"])
+                    EventLog(db).append(
+                        "task.status_changed", project_id=current["project_id"],
+                        source="execution-bridge", source_id=task.task_id,
+                        payload={"status": "cancelled", "reason": "operator cancellation acknowledged"},
+                    )
+                return True
+        except StaleLeaseError:
+            return False
+
+    @staticmethod
+    def _reconcile_cancelled_tasks(db: Database) -> int:
+        """Repair task projections when a worker dies before acknowledging cancellation."""
+        rows = db.execute(
+            "SELECT id, project_id, context_manifest FROM jobs "
+            "WHERE type=? AND status='cancelled' AND cancel_requested_at IS NOT NULL",
+            (ExecutionBridge.JOB_TYPE,),
+        ).fetchall()
+        repaired = 0
+        task_store = TaskStore(db)
+        for row in rows:
+            try:
+                task_id = json.loads(row["context_manifest"])["task_id"]
+                task = task_store.get(task_id)
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if task["status"] in {"done", "cancelled", "blocked"}:
+                continue
+            task_store.update_status(task_id, "cancelled", expected_version=task["version"])
+            EventLog(db).append(
+                "task.status_changed", project_id=row["project_id"], source="execution-bridge",
+                source_id=task_id,
+                payload={"status": "cancelled", "reason": "expired cancellation lease reconciled"},
+            )
+            repaired += 1
+        return repaired
 
     @staticmethod
     def _mark_failed(db: Database, queue: JobQueue, task_store: TaskStore,
