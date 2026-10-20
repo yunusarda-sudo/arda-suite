@@ -229,6 +229,11 @@ class TestSafeShell:
 
 
 class TestOpenTools:
+    @pytest.fixture(autouse=True)
+    def _macos_command_adapter(self, monkeypatch):
+        """The expected `open` argv belongs to macOS, not the CI runner."""
+        monkeypatch.setattr("arda.platform_runtime.system", lambda: "Darwin")
+
     def test_open_app(self, tmp_path):
         run = _fake_run()
         r = run_tool("open_app", {"name": "Safari"}, _ctx(tmp_path, run=run))

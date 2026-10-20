@@ -199,17 +199,22 @@ class ControlPlane:
             db.row_factory = sqlite3.Row
             return [dict(row) for row in db.execute(
                 "SELECT id, project_id, type, objective, status, leased_by, attempt_count, "
-                "cancel_requested_at, "
-                "started_at, finished_at, error, result, created_at, updated_at "
+                "started_at, finished_at, error, result, created_at, updated_at, version, "
+                "cancel_requested_at "
                 "FROM jobs ORDER BY updated_at DESC, id DESC").fetchall()]
 
-    def cancel_job(self, job_id: str, *, requested_by: str = "control-center-operator") -> dict[str, Any]:
+    def cancel_job(self, job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        actor = str(payload.get("requested_by", "")).strip()
+        if not actor or len(actor) > 128:
+            raise ValueError("requested_by must be a bounded operator identifier")
         db = bootstrap_runtime_database(self.db_path)
         try:
-            job = JobQueue(db).request_cancel(job_id, requested_by=requested_by)
-            row = db.execute("SELECT cancel_requested_at FROM jobs WHERE id=?", (job_id,)).fetchone()
-            return {"job_id": job.id, "status": job.status,
-                    "cancel_requested_at": row["cancel_requested_at"]}
+            job = JobQueue(db).request_cancel(
+                job_id, requested_by=actor,
+                expected_version=int(payload["expected_version"]),
+            )
+            return {"id": job.id, "status": job.status, "version": db.execute(
+                "SELECT version FROM jobs WHERE id=?", (job_id,)).fetchone()["version"]}
         finally:
             db.close()
 
@@ -412,6 +417,9 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
             if not self._authorized():
                 self._send({"error": "authorization required"}, 401)
                 return
+            if not self._origin_allowed():
+                self._send({"error": "cross-origin mutation denied"}, 403)
+                return
             content_length = int(self.headers.get("Content-Length", "0"))
             if content_length < 0 or content_length > self.MAX_BODY_BYTES:
                 self._send({"error": "request body too large"}, 413)
@@ -445,7 +453,7 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
             elif len(path) == 5 and path[1:3] == ["api", "tasks"] and path[4] == "status":
                 result = self.plane.update_task_status(path[3], payload["status"], int(payload["expected_version"]))
             elif len(path) == 5 and path[1:3] == ["api", "jobs"] and path[4] == "cancel":
-                result = self.plane.cancel_job(path[3])
+                result = self.plane.cancel_job(path[3], payload)
             else:
                 self._send({"error": "not found"}, 404)
                 return
@@ -460,9 +468,25 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
     def _authorized(self) -> bool:
         address = self.server.server_address[0]
         if address in {"127.0.0.1", "::1", "localhost"}:
-            return True
+            remote = self.client_address[0]
+            try:
+                import ipaddress
+                if not ipaddress.ip_address(remote).is_loopback:
+                    return False
+            except ValueError:
+                return False
+            host = urlparse("//" + self.headers.get("Host", "")).hostname
+            return host in {"localhost", "127.0.0.1", "::1"}
         token = os.environ.get("ARDA_CONTROL_TOKEN")
         return bool(token and self.headers.get("Authorization", "") == f"Bearer {token}")
+
+    def _origin_allowed(self) -> bool:
+        origin = self.headers.get("Origin")
+        if not origin:  # non-browser clients do not send Origin; bearer auth applies off-loopback
+            return True
+        parsed = urlparse(origin)
+        host = self.headers.get("Host", "")
+        return parsed.scheme in {"http", "https"} and parsed.netloc.casefold() == host.casefold()
 
     def log_message(self, *_args: Any) -> None:
         return
@@ -470,8 +494,8 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
 
 _DASHBOARD_HTML = """<!doctype html><meta charset=utf-8><title>Arda Control Center</title>
 <style>body{font:15px system-ui;margin:2rem;background:#0f172a;color:#e2e8f0}main{max-width:1100px;margin:auto}section{background:#1e293b;border-radius:14px;padding:1rem;margin:1rem 0}pre{white-space:pre-wrap;color:#cbd5e1}h1{color:#f8fafc}button{margin:.25rem;padding:.5rem 1rem;border:0;border-radius:8px}</style>
-<main><h1>Arda Control Center <span id=online>●</span></h1><section><h2>System</h2><pre id=status>Loading…</pre></section><section><h2>Organizations</h2><div id=orgControls></div><pre id=orgs>Loading…</pre><pre id=orgDetail>Loading…</pre></section><section><h2>Tasks</h2><pre id=tasks>Loading…</pre></section><section><h2>Execution Jobs</h2><pre id=jobs>Loading…</pre></section><section><h2>Agents / Memory / Evidence</h2><pre id=ops>Loading…</pre></section></main>
-<script>async function get(p){let r=await fetch(p);return r.json()}async function command(p,b){let r=await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});return r.json()}function renderJobs(items){jobs.replaceChildren();for(const item of items){const row=document.createElement('div'),details=document.createElement('pre');details.textContent=JSON.stringify(item,null,2);row.append(details);if(['queued','retry_wait','leased','running'].includes(item.status)){const button=document.createElement('button');button.textContent='Cancel job';button.onclick=()=>cancelJob(item.id);row.append(button)}jobs.append(row)}}async function refresh(){try{let [s,o,t,j,a,m,e]=await Promise.all(['/api/status','/api/organizations','/api/tasks','/api/jobs','/api/agents','/api/memory','/api/evidence'].map(get));status.textContent=JSON.stringify(s,null,2);orgs.textContent=JSON.stringify(o,null,2);if(o[0]){let detail=await get('/api/organizations/'+o[0].id);orgDetail.textContent=JSON.stringify(detail,null,2);let p=detail.profile;orgControls.innerHTML='<b>'+o[0].name+' · Autopilot '+(p.autopilot_state||'OFF')+'</b> <button onclick="toggleAuto(\''+o[0].id+'\','+(p.autopilot_enabled?'false':'true')+')">'+(p.autopilot_enabled?'Pause':'Start')+'</button><button onclick="dispatch(\''+o[0].id+'\')">Dispatch next</button>'}tasks.textContent=JSON.stringify(t,null,2);renderJobs(j);ops.textContent=JSON.stringify({agents:a,memory:m,evidence:e},null,2);online.textContent='● ONLINE'}catch(e){online.textContent='● OFFLINE'}}async function toggleAuto(id,enabled){await command('/api/organizations/'+id+'/autopilot',{enabled});refresh()}async function dispatch(id){await command('/api/organizations/'+id+'/dispatch',{});refresh()}async function cancelJob(id){await command('/api/jobs/'+encodeURIComponent(id)+'/cancel',{});refresh()}refresh();setInterval(refresh,5000);</script>"""
+<main><h1>Arda Control Center <span id=online>●</span></h1><section><h2>System</h2><pre id=status>Loading…</pre></section><section><h2>Organizations</h2><div id=orgControls></div><pre id=orgs>Loading…</pre><pre id=orgDetail>Loading…</pre></section><section><h2>Tasks</h2><pre id=tasks>Loading…</pre></section><section><h2>Execution Jobs</h2><div id=jobs>Loading…</div></section><section><h2>Agents / Memory / Evidence</h2><pre id=ops>Loading…</pre></section></main>
+<script>async function get(p){let r=await fetch(p);return r.json()}async function command(p,b){let r=await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});return r.json()}async function refresh(){try{let [s,o,t,j,a,m,e]=await Promise.all(['/api/status','/api/organizations','/api/tasks','/api/jobs','/api/agents','/api/memory','/api/evidence'].map(get));status.textContent=JSON.stringify(s,null,2);orgs.textContent=JSON.stringify(o,null,2);if(o[0]){const id=encodeURIComponent(o[0].id),detail=await get('/api/organizations/'+id);orgDetail.textContent=JSON.stringify(detail,null,2);const p=detail.profile;orgControls.replaceChildren();const label=document.createElement('b');label.textContent=o[0].name+' · Autopilot '+(p.autopilot_state||'OFF');orgControls.append(label);const toggle=document.createElement('button');toggle.textContent=p.autopilot_enabled?'Pause':'Start';toggle.onclick=()=>toggleAuto(id,!p.autopilot_enabled);orgControls.append(toggle);const dispatchButton=document.createElement('button');dispatchButton.textContent='Dispatch next';dispatchButton.onclick=()=>dispatch(id);orgControls.append(dispatchButton)}tasks.textContent=JSON.stringify(t,null,2);jobs.replaceChildren();for(const x of j){const row=document.createElement('div'),label=document.createElement('span');label.textContent=x.id+' · '+x.type+' · '+x.status+(x.cancel_requested_at?' · cancel requested':'');row.append(label);if(['queued','retry_wait','leased','running'].includes(x.status)&&!x.cancel_requested_at){const b=document.createElement('button');b.textContent='Cancel';b.onclick=()=>cancelJob(x.id,x.version);row.append(b)}jobs.append(row)}ops.textContent=JSON.stringify({agents:a,memory:m,evidence:e},null,2);online.textContent='● ONLINE'}catch(e){online.textContent='● OFFLINE'}}async function cancelJob(id,version){if(!confirm('Cancel job '+id+'?'))return;const result=await command('/api/jobs/'+encodeURIComponent(id)+'/cancel',{expected_version:version,requested_by:'local-control-center'});if(result.error)alert(result.error);await refresh()}async function toggleAuto(id,enabled){await command('/api/organizations/'+id+'/autopilot',{enabled});refresh()}async function dispatch(id){await command('/api/organizations/'+id+'/dispatch',{});refresh()}refresh();setInterval(refresh,5000)</script>"""
 
 
 def serve(*, host: str = "127.0.0.1", port: int = 8080, db: str | Path | None = None) -> None:

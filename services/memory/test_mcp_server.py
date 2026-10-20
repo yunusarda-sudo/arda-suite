@@ -185,12 +185,21 @@ class TestGraphTools(unittest.TestCase):
 class TestSkillsAndHarnessTools(unittest.TestCase):
 
     def test_list_available_skills(self):
-        output = ms.list_available_skills()
+        import skills_engine
+        with patch.object(skills_engine, "discover_skills", return_value=[{
+            "name": "git-worktree-sandbox", "scope": "repo", "description": "Use an isolated git worktree"
+        }]):
+            output = ms.list_available_skills()
         self.assertIn("Discovered Skills", output)
         self.assertIn("git-worktree-sandbox", output)
 
     def test_list_skills_with_matching(self):
-        output = ms.list_available_skills(task_context="ast parse python codebase")
+        import skills_engine
+        with patch.object(skills_engine, "discover_skills", return_value=[{
+            "name": "ast-codebase-navigator", "scope": "repo",
+            "description": "Navigate Python codebases by parsing their AST"
+        }]):
+            output = ms.list_available_skills(task_context="ast parse python codebase")
         self.assertIn("ast-codebase-navigator", output)
 
     def test_execute_with_harness_safe(self):
@@ -228,16 +237,16 @@ class TestCompactionTools(unittest.TestCase):
 
         mock_compact.assert_called_once_with(scope="test_scope", dry_run=True)
 
-    @patch("compaction.compact_scope")
-    def test_compact_memories_propagates_read_error_without_reporting_empty_success(self, mock_compact):
+    @patch("compaction.read_inventory")
+    def test_compact_memories_propagates_read_error_without_reporting_empty_success(self, mock_inventory):
         from memory_store import MemoryReadError
-        mock_compact.side_effect = MemoryReadError("Qdrant unavailable")
+        mock_inventory.side_effect = MemoryReadError("Qdrant unavailable")
 
         with self.assertRaises(MemoryReadError) as raised:
             ms.compact_memories(scope="test_scope", dry_run=True)
 
         self.assertIn("Qdrant unavailable", str(raised.exception))
-        mock_compact.assert_not_called()
+        mock_inventory.assert_called_once()
 
     @patch("ide_bridge.evaluate_health_score")
     @patch("mcp_server._mem")
@@ -254,16 +263,16 @@ class TestCompactionTools(unittest.TestCase):
         self.assertIn("Qdrant unavailable", str(raised.exception))
         mock_eval.assert_not_called()
 
-    @patch("compaction.sweep_stale_memories")
-    def test_sweep_propagates_read_error_without_reporting_empty_success(self, mock_sweep):
+    @patch("compaction.read_inventory")
+    def test_sweep_propagates_read_error_without_reporting_empty_success(self, mock_inventory):
         from memory_store import MemoryReadError
-        mock_sweep.side_effect = MemoryReadError("Qdrant unavailable")
+        mock_inventory.side_effect = MemoryReadError("Qdrant unavailable")
 
         with self.assertRaises(MemoryReadError) as raised:
             ms.sweep_stale_memories(scope="test_scope", dry_run=True)
 
         self.assertIn("Qdrant unavailable", str(raised.exception))
-        mock_sweep.assert_not_called()
+        mock_inventory.assert_called_once()
 
     @patch("compaction.compact_scope")
     def test_compact_memories_tool(self, mock_compact):
@@ -307,11 +316,8 @@ class TestCompactionTools(unittest.TestCase):
 class TestIDEBridgeTools(unittest.TestCase):
 
     @patch("ide_bridge.evaluate_health_score")
-    @patch("mcp_server._mem")
-    def test_get_memory_health_tool(self, mock_mem, mock_eval):
-        mock_client = MagicMock()
-        mock_client.get_all.return_value = []
-        mock_mem.return_value = mock_client
+    @patch("mcp_server.read_inventory", return_value=[])
+    def test_get_memory_health_tool(self, mock_inventory, mock_eval):
         mock_eval.return_value = {
             "scope": "test_proj",
             "score": 95,
@@ -331,6 +337,8 @@ class TestIDEBridgeTools(unittest.TestCase):
         output = ms.get_memory_health(scope="test_proj")
         self.assertIn("Memory Health Score: 95/100 [EXCELLENT]", output)
         self.assertIn("Keep memories updated", output)
+        mock_inventory.assert_called_once()
+        self.assertEqual(mock_inventory.call_args.kwargs["scope"], "test_proj")
 
     @patch("ide_bridge.sync_cursor_rules")
     @patch("ide_bridge.generate_mcp_config")

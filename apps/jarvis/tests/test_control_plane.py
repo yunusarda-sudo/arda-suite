@@ -101,6 +101,10 @@ def test_control_center_cancels_queued_jobs_and_requests_cooperative_running_can
     queue.start(lease.id, lease.lease_token)
     assert lease.id == running.id
     queued = queue.enqueue("test", "cancel before claim", idempotency_key="cancel-api-queued")
+    versions = {
+        job.id: db.execute("SELECT version FROM jobs WHERE id=?", (job.id,)).fetchone()["version"]
+        for job in (queued, running)
+    }
     db.close()
     plane = ControlPlane(db_path, evidence_root=tmp_path)
 
@@ -114,11 +118,13 @@ def test_control_center_cancels_queued_jobs_and_requests_cooperative_running_can
         for job_id in (queued.id, running.id):
             request = urllib.request.Request(
                 f"http://127.0.0.1:{server.server_port}/api/jobs/{job_id}/cancel",
-                data=b"{}", headers={"Content-Type": "application/json"}, method="POST",
+                data=json.dumps({"expected_version": versions[job_id], "requested_by": "test-operator"}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST",
             )
             with urllib.request.urlopen(request) as response:
                 result = json.load(response)
-            assert result["cancel_requested_at"]
+            assert result["id"] == job_id
+            assert result["version"] > versions[job_id]
         jobs = {item["id"]: item for item in plane.jobs()}
         assert jobs[queued.id]["status"] == "cancelled"
         assert jobs[running.id]["status"] == "running"
@@ -218,6 +224,54 @@ def test_control_center_rejects_malformed_json_and_non_object_payload(tmp_path):
     try:
         assert post(b"{") == 400
         assert post(b"[]") == 400
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+
+
+def test_control_center_job_cancellation_is_versioned_and_origin_checked(tmp_path):
+    db_path = tmp_path / "core.sqlite3"
+    db = bootstrap_runtime_database(db_path)
+    job = JobQueue(db).enqueue("test", "operator cancellation", idempotency_key="cc-cancel")
+    version = db.execute("SELECT version FROM jobs WHERE id=?", (job.id,)).fetchone()["version"]
+    db.close()
+    plane = ControlPlane(db_path, evidence_root=tmp_path)
+
+    class Handler(ControlCenterHandler):
+        pass
+    Handler.plane = plane
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}/api/jobs/{job.id}/cancel"
+
+    def post(origin: str, expected_version: int, host: str | None = None):
+        headers = {"Content-Type": "application/json", "Origin": origin}
+        if host:
+            headers["Host"] = host
+        request = urllib.request.Request(
+            url,
+            data=json.dumps({"expected_version": expected_version,
+                             "requested_by": "test-operator"}).encode(),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request) as response:
+                return response.status, json.load(response)
+        except HTTPError as exc:
+            return exc.code, None
+
+    try:
+        assert post("http://attacker.example", version) == (403, None)
+        assert post(f"http://127.0.0.1:{server.server_port}", version,
+                    host="attacker.example") == (401, None)
+        status, result = post(f"http://127.0.0.1:{server.server_port}", version)
+        assert status == 200
+        assert result["status"] == "cancelled"
+        assert plane.jobs()[0]["cancel_requested_at"] is not None
+        assert plane.jobs()[0]["version"] > version
+        assert post(f"http://127.0.0.1:{server.server_port}", version) == (422, None)
     finally:
         server.shutdown()
         thread.join(timeout=2)
