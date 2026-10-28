@@ -239,9 +239,11 @@ def _compact_command(args) -> int:
     }.get(res.get("status"), "[DRY-RUN]" if res["dry_run"] else "[APPLIED]")
     print(f"  Compaction {mode} in scope '{res['scope']}':")
     if res["dry_run"]:
-        print(f"  found {res['clusters_found']} clusters ({res['would_supersede']} memories would be superseded)")
+        would_supersede = res.get("would_supersede", res.get("memories_compacted", 0))
+        print(f"  found {res['clusters_found']} clusters ({would_supersede} memories would be superseded)")
     else:
-        print(f"  found {res['clusters_found']} clusters ({res['memories_compacted']} memories superseded)")
+        compacted = res.get("memories_compacted", res.get("would_supersede", 0))
+        print(f"  found {res['clusters_found']} clusters ({compacted} memories superseded)")
     for s in res["syntheses"]:
         print(f"\n  --- Synthesis [{s.get('status', 'unknown')}] ---")
         for line in s["synthesis"].splitlines():

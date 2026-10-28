@@ -1,8 +1,13 @@
 """Unit tests for mem.py CLI helper functions and commands."""
 
+import sys
 import unittest
 import json
 from unittest.mock import MagicMock, patch
+
+if "mem0" not in sys.modules:
+    sys.modules["mem0"] = MagicMock()
+
 import mem
 
 
@@ -49,6 +54,7 @@ class TestMemCLI(unittest.TestCase):
         res_score = mem._attr(item_active, score=True)
         self.assertIn("0.876", res_score)
 
+    @patch.object(mem, "OWNER", "default")
     @patch("mem.urllib.request.urlopen")
     def test_scroll_filtering(self, mock_urlopen):
         mock_response = MagicMock()

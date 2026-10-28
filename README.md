@@ -85,6 +85,8 @@ cd services/memory
 
 Review the [Shared Memory Guide](services/memory/README.md) and [Raspberry Pi Setup](services/memory/docs/RASPBERRY-PI-SETUP.md) for configuration details.
 
+The goal is to make execution behavior inspectable, bounded, and testable—not just convincing in a demo.
+
 ---
 
 ## Development & Verification
@@ -119,4 +121,5 @@ For in-depth architectural specifications, ADRs, and verification records:
 
 ## License & Contributing
 
-Built for local-first, verifiable AI assistance. Please report any security vulnerabilities responsibly according to our [Security Policy](SECURITY.md).
+Built for local-first, verifiable AI assistance. Interested in contributing? Start with the [contribution guide](CONTRIBUTING.md). Please report any security vulnerabilities responsibly according to our [Security Policy](SECURITY.md).
+

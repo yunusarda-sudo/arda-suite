@@ -15,7 +15,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from arda.awareness import ProjectRegistry, TaskStore
 from arda.autonomous_work_loop import WorkTask
@@ -23,6 +23,7 @@ from arda.core import JobQueue, bootstrap_runtime_database, runtime_database_pat
 from arda.diagnostics import Diagnostics
 from arda.execution_bridge import ExecutionBridge
 from arda.organization import OrganizationRegistry
+from arda.tracked_jobs import TrackedJobError, TrackedJobRegistry
 
 
 def _strict_bool(value: Any, field: str) -> bool:
@@ -202,6 +203,41 @@ class ControlPlane:
                 "started_at, finished_at, error, result, created_at, updated_at "
                 "FROM jobs ORDER BY updated_at DESC, id DESC").fetchall()]
 
+    def tracked_jobs(self, *, view="all", project="", query="", limit=100, offset=0) -> list[dict[str, Any]]:
+        if not self.db_path.exists():
+            return []
+        db = bootstrap_runtime_database(self.db_path)
+        try:
+            return TrackedJobRegistry(db).list_jobs(view=view, project=project, query=query,
+                                                   limit=limit, offset=offset)
+        finally:
+            db.close()
+
+    def tracked_job(self, job_id: str) -> dict[str, Any] | None:
+        if not self.db_path.exists():
+            return None
+        db = bootstrap_runtime_database(self.db_path)
+        try:
+            return TrackedJobRegistry(db).get_job(job_id)
+        finally:
+            db.close()
+
+    def tracked_run(self, job_id: str, run_id: str) -> dict[str, Any] | None:
+        if not self.db_path.exists():
+            return None
+        db = bootstrap_runtime_database(self.db_path)
+        try:
+            return TrackedJobRegistry(db).get_run(job_id, run_id)
+        finally:
+            db.close()
+
+    def append_tracked_job_event(self, payload: dict[str, Any], *, source="external") -> dict[str, Any]:
+        db = bootstrap_runtime_database(self.db_path)
+        try:
+            return TrackedJobRegistry(db).append(payload, source=source)
+        finally:
+            db.close()
+
     def enqueue_task(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Validate a UI task contract and place it in the durable queue."""
         required = {"project_id", "task_id", "objective", "acceptance", "repo",
@@ -333,6 +369,29 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
             self._send({"error": "authorization required"}, 401)
             return
         path = urlparse(self.path).path
+        if path == "/api/tracked-jobs":
+            values = parse_qs(urlparse(self.path).query)
+            try:
+                jobs = self.plane.tracked_jobs(
+                    view=values.get("view", ["all"])[0],
+                    project=values.get("project", [""])[0][:120],
+                    query=values.get("q", [""])[0][:160],
+                    limit=int(values.get("limit", ["100"])[0]) + 1,
+                    offset=values.get("offset", ["0"])[0],
+                )
+                limit = max(1, min(int(values.get("limit", ["100"])[0]), 250))
+                return self._send({"jobs": jobs[:limit], "has_more": len(jobs) > limit,
+                                   "next_offset": int(values.get("offset", ["0"])[0]) + limit})
+            except (ValueError, TypeError):
+                return self._send({"error": "invalid tracked-job query"}, 422)
+        if path.startswith("/api/tracked-jobs/"):
+            parts = path.split("/")
+            if len(parts) == 4:
+                job = self.plane.tracked_job(parts[3])
+                return self._send(job or {"error": "tracked job not found"}, 200 if job else 404)
+            if len(parts) == 6 and parts[4] == "runs":
+                run = self.plane.tracked_run(parts[3], parts[5])
+                return self._send(run or {"error": "tracked run not found"}, 200 if run else 404)
         routes = {"/api/status": self.plane.status, "/api/organizations": self.plane.organizations,
                   "/api/tasks": self.plane.tasks, "/api/jobs": self.plane.jobs,
                   "/api/agents": self.plane.agents,
@@ -417,7 +476,12 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
                 self._send({"error": "JSON object required"}, 400)
                 return
             result = None
-            if path == ["", "api", "tasks"]:
+            if path == ["", "api", "tracked-jobs", "events"]:
+                if content_length > 16_384:
+                    self._send({"error": "request body too large"}, 413)
+                    return
+                result = self.plane.append_tracked_job_event(payload, source="external")
+            elif path == ["", "api", "tasks"]:
                 result = self.plane.enqueue_task(payload)
             elif len(path) == 5 and path[1:3] == ["api", "organizations"] and path[4] == "profile":
                 result = self.plane.update_organization_profile(path[3], payload)

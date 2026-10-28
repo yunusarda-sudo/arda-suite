@@ -9,6 +9,9 @@
 
 Mimari detaylar ve operasyonel kılavuzlar için [docs/README.md](docs/README.md) dizinine, arşivlenmiş spesifikasyonlar için [`docs/specs/`](docs/specs/README.md) dizinine bakın.
 
+For durable operational job cards backed by the Core event registry, see the
+[Tracked Jobs API](TRACKED_JOBS_API.md).
+
 ---
 
 ## Jarvis desktop assistant
