@@ -17,6 +17,9 @@ The repository contains code at different maturity levels. The desktop assistant
 
 The root-level `ARDA_*`, `HERMES_*`, `SPEC.md`, and related design documents preserve the development history. They are design and acceptance records, not a guarantee that every proposed capability is available in a production deployment.
 
+For durable operational job cards backed by the Core event registry, see the
+[Tracked Jobs API](TRACKED_JOBS_API.md).
+
 ---
 
 ## Jarvis desktop assistant

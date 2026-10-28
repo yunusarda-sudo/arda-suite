@@ -101,3 +101,5 @@ SECURITY.md         Private vulnerability reporting
 **Reviewer starting points:** [permission boundary](apps/jarvis/arda/agent_permission.py) · [execution bridge](apps/jarvis/arda/execution_bridge.py) · [MCP transport](services/memory/mcp_transport.py) · [tests](apps/jarvis/tests/) · [data policy](docs/PRODUCT_LAYOUT.md).
 
 The goal is to make execution behavior inspectable, bounded, and testable—not just convincing in a demo.
+
+Interested in contributing? Start with the [contribution guide](CONTRIBUTING.md).

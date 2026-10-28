@@ -807,6 +807,32 @@ class EventLog:
         return row
 
 
+def _record_tracked_job_event(
+    db: Database, *, job_id: str, run_id: str, status: str,
+    idempotency_key: str, name: str, project: str | None,
+    kind: str = "one_off", metrics: dict[str, Any] | None = None,
+    result: Any = None, log: str = "", heartbeat_timeout_seconds: int = 300,
+    clock: Callable[[], datetime] = _utc_now,
+) -> None:
+    """Mirror Core queue lifecycle into the generic operational event stream."""
+    if db.execute(
+        "SELECT 1 FROM events WHERE type='tracked_job.lifecycle' AND source_id=? LIMIT 1",
+        (idempotency_key,),
+    ).fetchone():
+        return
+    payload = {
+        "job_id": job_id, "run_id": run_id, "name": name[:160],
+        "project": project or "", "kind": kind, "status": status,
+        "progress": None, "metrics": metrics or {}, "log": log[-4000:],
+        "result": result, "scheduled_at": "",
+        "heartbeat_timeout_seconds": heartbeat_timeout_seconds,
+    }
+    EventLog(db, clock).append(
+        "tracked_job.lifecycle", source="core-job-queue", source_id=idempotency_key,
+        payload=payload, correlation_id=job_id,
+    )
+
+
 @dataclass(frozen=True)
 class Job:
     id: str
@@ -856,18 +882,25 @@ class JobQueue:
             "policy_snapshot": policy_snapshot if policy_snapshot is not None else {},
         })
         try:
-            self.db.execute(
-                """INSERT INTO jobs(
-                    id, project_id, type, objective, acceptance_criteria, priority,
-                    available_at, max_attempts, timeout_seconds, idempotency_key,
-                    context_manifest, policy_snapshot, input_hash, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (job_id, project_id, job_type, objective,
-                 _json(criteria), priority, _iso(now), max_attempts, timeout_seconds,
-                 idempotency_key, _json(context_manifest if context_manifest is not None else []),
-                 _json(policy_snapshot if policy_snapshot is not None else {}), input_hash,
-                 _iso(now), _iso(now)),
-            )
+            with self.db.transaction():
+                self.db.execute(
+                    """INSERT INTO jobs(
+                        id, project_id, type, objective, acceptance_criteria, priority,
+                        available_at, max_attempts, timeout_seconds, idempotency_key,
+                        context_manifest, policy_snapshot, input_hash, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (job_id, project_id, job_type, objective,
+                     _json(criteria), priority, _iso(now), max_attempts, timeout_seconds,
+                     idempotency_key, _json(context_manifest if context_manifest is not None else []),
+                     _json(policy_snapshot if policy_snapshot is not None else {}), input_hash,
+                     _iso(now), _iso(now)),
+                )
+                _record_tracked_job_event(
+                    self.db, job_id=job_id, run_id=f"{job_id}-attempt-1", status="queued",
+                    idempotency_key=f"core:{job_id}:attempt-1:queued", name=objective,
+                    project=project_id, metrics={"attempt": 1, "max_attempts": max_attempts},
+                    heartbeat_timeout_seconds=max(300, self.lease_seconds * 2), clock=self.clock,
+                )
         except sqlite3.IntegrityError:
             existing = self.db.execute(
                 "SELECT * FROM jobs WHERE idempotency_key = ?", (idempotency_key,)
@@ -883,6 +916,9 @@ class JobQueue:
         now = self.clock()
         now_text = _iso(now)
         with self.db.transaction():
+            expired_running = self.db.execute(
+                "SELECT * FROM jobs WHERE status='running' AND lease_expires_at < ?", (now_text,)
+            ).fetchall()
             leased = self.db.execute(
                 """UPDATE jobs SET status='queued', leased_by=NULL,
                     lease_token=NULL, lease_expires_at=NULL, updated_at=?, version=version+1
@@ -904,6 +940,19 @@ class JobQueue:
                     WHERE status='retry_wait' AND available_at <= ?""",
                 (now_text, now_text),
             ).rowcount
+            for row in expired_running:
+                retrying = row["attempt_count"] < row["max_attempts"]
+                status = "retrying" if retrying else "failed"
+                current = self.db.execute("SELECT error FROM jobs WHERE id=?", (row["id"],)).fetchone()
+                _record_tracked_job_event(
+                    self.db, job_id=row["id"], run_id=f"{row['id']}-attempt-{row['attempt_count']}",
+                    status=status,
+                    idempotency_key=f"core:{row['id']}:attempt-{row['attempt_count']}:lease-expired:{status}",
+                    name=row["objective"], project=row["project_id"],
+                    metrics={"attempt": row["attempt_count"], "max_attempts": row["max_attempts"]},
+                    log=current["error"] or "worker heartbeat expired",
+                    heartbeat_timeout_seconds=max(300, self.lease_seconds * 2), clock=self.clock,
+                )
         # Return affected jobs, not SQL statement row-counts: a running job can
         # be transitioned through retry_wait and queued in the same pass.
         return leased + running
@@ -931,6 +980,15 @@ class JobQueue:
                     updated_at=?, version=version+1 WHERE id=? AND status='queued'""",
                 (worker_id, token, _iso(expires), _iso(now), row["id"]),
             )
+            attempt = row["attempt_count"] + 1
+            if attempt > 1:
+                _record_tracked_job_event(
+                    self.db, job_id=row["id"], run_id=f"{row['id']}-attempt-{attempt}",
+                    status="queued", idempotency_key=f"core:{row['id']}:attempt-{attempt}:queued",
+                    name=row["objective"], project=row["project_id"],
+                    metrics={"attempt": attempt, "max_attempts": row["max_attempts"]},
+                    heartbeat_timeout_seconds=max(300, self.lease_seconds * 2), clock=self.clock,
+                )
             self.events.append(
                 "job.leased", source="core", source_id=row["id"],
                 payload={"worker_id": worker_id},
@@ -946,6 +1004,13 @@ class JobQueue:
                 "updated_at=?, version=version+1 WHERE id=? AND lease_token=?",
                 (_iso(now), _iso(now), job_id, lease_token),
             )
+            _record_tracked_job_event(
+                self.db, job_id=job_id, run_id=f"{job_id}-attempt-{row['attempt_count']}",
+                status="running", idempotency_key=f"core:{job_id}:attempt-{row['attempt_count']}:running",
+                name=row["objective"], project=row["project_id"],
+                metrics={"attempt": row["attempt_count"], "max_attempts": row["max_attempts"]},
+                heartbeat_timeout_seconds=max(300, self.lease_seconds * 2), clock=self.clock,
+            )
             self.events.append("job.started", source="core", source_id=job_id)
         return self.get(job_id)
 
@@ -959,6 +1024,15 @@ class JobQueue:
                 "WHERE id=? AND lease_token=?",
                 (_iso(expires), _iso(now), job_id, lease_token),
             )
+            if row["status"] == "running":
+                _record_tracked_job_event(
+                    self.db, job_id=job_id, run_id=f"{job_id}-attempt-{row['attempt_count']}",
+                    status="running",
+                    idempotency_key=f"core:{job_id}:attempt-{row['attempt_count']}:heartbeat:{int(now.timestamp() // 60)}",
+                    name=row["objective"], project=row["project_id"],
+                    metrics={"attempt": row["attempt_count"], "max_attempts": row["max_attempts"]},
+                    heartbeat_timeout_seconds=max(300, self.lease_seconds * 2), clock=self.clock,
+                )
         return self.get(row["id"])
 
     def record_artifact(
@@ -1022,6 +1096,15 @@ class JobQueue:
                     WHERE id=? AND lease_token=?""",
                 (_json(result), _iso(now), _iso(now), row["id"], lease_token),
             )
+            _record_tracked_job_event(
+                self.db, job_id=row["id"], run_id=f"{row['id']}-attempt-{row['attempt_count']}",
+                status="completed",
+                idempotency_key=f"core:{row['id']}:attempt-{row['attempt_count']}:completed",
+                name=row["objective"], project=row["project_id"],
+                metrics={"attempt": row["attempt_count"], "verified_artifacts": artifacts},
+                result={"verified_artifacts": artifacts},
+                heartbeat_timeout_seconds=max(300, self.lease_seconds * 2), clock=self.clock,
+            )
             self.events.append("job.completed", source="core", source_id=job_id,
                               payload={"artifact_count": artifacts})
         return self.get(job_id)
@@ -1037,6 +1120,15 @@ class JobQueue:
                     leased_by=NULL, lease_token=NULL, lease_expires_at=NULL, version=version+1
                     WHERE id=? AND lease_token=?""",
                 (status, error, _iso(now), None if retry else _iso(now), _iso(now), row["id"], lease_token),
+            )
+            tracked_status = "retrying" if retry else "failed"
+            _record_tracked_job_event(
+                self.db, job_id=row["id"], run_id=f"{row['id']}-attempt-{row['attempt_count']}",
+                status=tracked_status,
+                idempotency_key=f"core:{row['id']}:attempt-{row['attempt_count']}:{tracked_status}",
+                name=row["objective"], project=row["project_id"],
+                metrics={"attempt": row["attempt_count"], "max_attempts": row["max_attempts"]},
+                log=error, heartbeat_timeout_seconds=max(300, self.lease_seconds * 2), clock=self.clock,
             )
             self.events.append(
                 "job.retry_scheduled" if retry else "job.failed",
