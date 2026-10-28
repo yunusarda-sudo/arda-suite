@@ -1,0 +1,148 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 360" width="100%" height="100%" fill="none">
+  <defs>
+    <radialGradient id="flowGlow" cx="50%" cy="50%" r="70%">
+      <stop offset="0%" stop-color="#1E1B4B" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#020617" stop-opacity="0.95"/>
+    </radialGradient>
+
+    <linearGradient id="nodeGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1E293B" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#0F172A" stop-opacity="0.95"/>
+    </linearGradient>
+
+    <!-- Border Gradients -->
+    <linearGradient id="gateGreen" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10B981"/>
+      <stop offset="100%" stop-color="#059669"/>
+    </linearGradient>
+
+    <linearGradient id="gateAmber" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F59E0B"/>
+      <stop offset="100%" stop-color="#D97706"/>
+    </linearGradient>
+
+    <linearGradient id="gateRed" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#EF4444"/>
+      <stop offset="100%" stop-color="#DC2626"/>
+    </linearGradient>
+
+    <!-- Marker Arrowheads -->
+    <marker id="arrowCyan" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M 0 0 L 8 4 L 0 8 Z" fill="#38BDF8"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M 0 0 L 8 4 L 0 8 Z" fill="#10B981"/>
+    </marker>
+    <marker id="arrowAmber" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M 0 0 L 8 4 L 0 8 Z" fill="#F59E0B"/>
+    </marker>
+    <marker id="arrowRed" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M 0 0 L 8 4 L 0 8 Z" fill="#EF4444"/>
+    </marker>
+    <marker id="arrowPurple" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M 0 0 L 8 4 L 0 8 Z" fill="#C084FC"/>
+    </marker>
+  </defs>
+
+  <style>
+    .f-title { font-family: -apple-system, BlinkMacSystemFont, 'Inter', Roboto, sans-serif; font-weight: 700; font-size: 15px; fill: #F8FAFC; }
+    .f-sub { font-family: -apple-system, BlinkMacSystemFont, 'Inter', Roboto, sans-serif; font-weight: 400; font-size: 12px; fill: #94A3B8; }
+    .pill-text { font-family: -apple-system, BlinkMacSystemFont, 'Inter', Roboto, sans-serif; font-weight: 700; font-size: 11px; letter-spacing: 0.5px; }
+  </style>
+
+  <!-- Container Box -->
+  <rect width="1100" height="360" rx="14" fill="url(#flowGlow)" stroke="#334155" stroke-width="1.2"/>
+
+  <!-- Connections / Lines -->
+  <!-- User to Jarvis -->
+  <path d="M 180 150 L 250 150" stroke="#38BDF8" stroke-width="2" marker-end="url(#arrowCyan)"/>
+
+  <!-- Jarvis to Planner/Gate -->
+  <path d="M 430 150 L 490 150" stroke="#38BDF8" stroke-width="2" marker-end="url(#arrowCyan)"/>
+
+  <!-- Gate to Auto (Green) -->
+  <path d="M 670 120 L 740 70" stroke="#10B981" stroke-width="1.8" marker-end="url(#arrowGreen)"/>
+
+  <!-- Gate to Confirm (Amber) -->
+  <path d="M 680 150 L 740 150" stroke="#F59E0B" stroke-width="1.8" marker-end="url(#arrowAmber)"/>
+
+  <!-- Gate to Deny (Red) -->
+  <path d="M 670 180 L 740 230" stroke="#EF4444" stroke-width="1.8" marker-end="url(#arrowRed)"/>
+
+  <!-- Confirm to Execution -->
+  <path d="M 910 150 L 945 150" stroke="#F59E0B" stroke-width="1.5" stroke-dasharray="4,4" marker-end="url(#arrowAmber)"/>
+
+  <!-- Jarvis down to Shared Memory -->
+  <path d="M 340 205 L 340 270 L 490 270" stroke="#C084FC" stroke-width="2" stroke-dasharray="5,5" marker-end="url(#arrowPurple)"/>
+
+  <!-- 1. Node: User Input -->
+  <g transform="translate(30, 95)">
+    <rect width="150" height="110" rx="10" fill="url(#nodeGrad)" stroke="#38BDF8" stroke-width="1.2"/>
+    <text x="75" y="32" font-size="22" text-anchor="middle">👤 / 🎙️</text>
+    <text x="75" y="60" class="f-title" text-anchor="middle">User Input</text>
+    <text x="75" y="80" class="f-sub" text-anchor="middle">Push-to-Talk (⌘⇧A)</text>
+    <text x="75" y="96" class="f-sub" text-anchor="middle">Dictation (⌘⇧D)</text>
+  </g>
+
+  <!-- 2. Node: Jarvis Assistant & Core -->
+  <g transform="translate(250, 95)">
+    <rect width="180" height="110" rx="10" fill="url(#nodeGrad)" stroke="#818CF8" stroke-width="1.4"/>
+    <text x="90" y="32" font-size="22" text-anchor="middle">⚡</text>
+    <text x="90" y="60" class="f-title" text-anchor="middle">Jarvis &amp; ARDA Core</text>
+    <text x="90" y="80" class="f-sub" text-anchor="middle">Intent Parser &amp; Router</text>
+    <text x="90" y="96" class="f-sub" text-anchor="middle">Multi-Step Task Planner</text>
+  </g>
+
+  <!-- 3. Node: Permission Gate -->
+  <g transform="translate(490, 85)">
+    <rect width="180" height="130" rx="10" fill="url(#nodeGrad)" stroke="#F59E0B" stroke-width="1.4"/>
+    <text x="90" y="32" font-size="22" text-anchor="middle">🛡️</text>
+    <text x="90" y="60" class="f-title" text-anchor="middle">Permission Gate</text>
+    <text x="90" y="80" class="f-sub" text-anchor="middle">Agent Policy Engine</text>
+    <text x="90" y="100" class="f-sub" text-anchor="middle">Path Traversal Defense</text>
+    <text x="90" y="116" class="f-sub" text-anchor="middle">Audit Trail Logger</text>
+  </g>
+
+  <!-- 4. Gate Branches -->
+  <!-- AUTO -->
+  <g transform="translate(745, 45)">
+    <rect width="165" height="50" rx="8" fill="#064E3B" fill-opacity="0.4" stroke="url(#gateGreen)" stroke-width="1.2"/>
+    <circle cx="20" cy="25" r="5" fill="#10B981"/>
+    <text x="32" y="24" class="pill-text" fill="#34D399">AUTO</text>
+    <text x="32" y="38" class="f-sub" fill="#A7F3D0">Read-only / Safe tools</text>
+  </g>
+
+  <!-- CONFIRM -->
+  <g transform="translate(745, 125)">
+    <rect width="165" height="50" rx="8" fill="#78350F" fill-opacity="0.4" stroke="url(#gateAmber)" stroke-width="1.2"/>
+    <circle cx="20" cy="25" r="5" fill="#F59E0B"/>
+    <text x="32" y="24" class="pill-text" fill="#FBBF24">CONFIRM</text>
+    <text x="32" y="38" class="f-sub" fill="#FDE68A">Native macOS Dialog</text>
+  </g>
+
+  <!-- DENY -->
+  <g transform="translate(745, 205)">
+    <rect width="165" height="50" rx="8" fill="#7F1D1D" fill-opacity="0.4" stroke="url(#gateRed)" stroke-width="1.2"/>
+    <circle cx="20" cy="25" r="5" fill="#EF4444"/>
+    <text x="32" y="24" class="pill-text" fill="#F87171">DENY</text>
+    <text x="32" y="38" class="f-sub" fill="#FECACA">Credentials / Destructive</text>
+  </g>
+
+  <!-- 5. Node: Execution & Verifier -->
+  <g transform="translate(950, 85)">
+    <rect width="125" height="130" rx="10" fill="url(#nodeGrad)" stroke="#10B981" stroke-width="1.2"/>
+    <text x="62" y="32" font-size="22" text-anchor="middle">⚙️</text>
+    <text x="62" y="60" class="f-title" text-anchor="middle">Execution</text>
+    <text x="62" y="80" class="f-sub" text-anchor="middle">Step Verifier</text>
+    <text x="62" y="98" class="f-sub" text-anchor="middle">Obsidian Log</text>
+    <text x="62" y="116" class="f-sub" text-anchor="middle">Voice Output</text>
+  </g>
+
+  <!-- 6. Node: Shared Memory (Bottom) -->
+  <g transform="translate(490, 240)">
+    <rect width="420" height="60" rx="10" fill="url(#nodeGrad)" stroke="#C084FC" stroke-width="1.2"/>
+    <text x="30" y="38" font-size="22">🧠</text>
+    <text x="55" y="28" class="f-title">Shared Memory Service (MCP HTTP Transport)</text>
+    <text x="55" y="48" class="f-sub">mem0 + Qdrant Vector Storage · Local Ollama Embeddings · Dashboard</text>
+  </g>
+</svg>

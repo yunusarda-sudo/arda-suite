@@ -2,6 +2,7 @@
 
 import sys
 import unittest
+import json
 from unittest.mock import MagicMock, patch
 
 if "mem0" not in sys.modules:
@@ -63,7 +64,7 @@ class TestMemCLI(unittest.TestCase):
                     {
                         "id": "11111111-0000-0000-0000-000000000001",
                         "payload": {
-                            "user_id": "example-user",
+                            "user_id": "default",
                             "run_id": "projA",
                             "agent_id": "cli",
                             "data": "Active memory 1",
@@ -74,7 +75,7 @@ class TestMemCLI(unittest.TestCase):
                     {
                         "id": "11111111-0000-0000-0000-000000000002",
                         "payload": {
-                            "user_id": "example-user",
+                            "user_id": "default",
                             "run_id": "projA",
                             "agent_id": "cli",
                             "data": "Superseded memory 2",
@@ -91,7 +92,8 @@ class TestMemCLI(unittest.TestCase):
                             "status": "active"
                         }
                     }
-                ]
+                ],
+                "next_page_offset": null
             }
         }"""
         mock_urlopen.return_value = mock_response
@@ -107,6 +109,42 @@ class TestMemCLI(unittest.TestCase):
         ids = {p["id"] for p in all_pts}
         self.assertIn("11111111-0000-0000-0000-000000000001", ids)
         self.assertIn("11111111-0000-0000-0000-000000000002", ids)
+
+    @patch("mem.urllib.request.urlopen")
+    def test_scroll_reads_all_pages_and_preserves_owner_scope_filters(self, mock_urlopen):
+        page_one = MagicMock()
+        page_one.read.return_value = json.dumps({
+            "result": {
+                "points": [
+                    {"id": "one", "payload": {"user_id": mem.OWNER, "run_id": "projA", "data": "first"}},
+                    {"id": "other", "payload": {"user_id": "someone-else", "run_id": "projA", "data": "private"}},
+                ],
+                "next_page_offset": "cursor-two",
+            }
+        }).encode()
+        page_two = MagicMock()
+        page_two.read.return_value = json.dumps({
+            "result": {
+                "points": [
+                    {"id": "two", "payload": {"user_id": mem.OWNER, "run_id": "projA", "data": "second"}},
+                    {"id": "wrong-scope", "payload": {"user_id": mem.OWNER, "run_id": "projB", "data": "other scope"}},
+                ],
+                "next_page_offset": None,
+            }
+        }).encode()
+        mock_urlopen.side_effect = [page_one, page_two]
+
+        rows = mem._scroll(scope="projA")
+
+        self.assertEqual([row["id"] for row in rows], ["one", "two"])
+        self.assertEqual(mock_urlopen.call_count, 2)
+        second_request = mock_urlopen.call_args_list[1].args[0]
+        self.assertEqual(json.loads(second_request.data)["offset"], "cursor-two")
+
+    @patch("mem.urllib.request.urlopen", side_effect=OSError("Qdrant unavailable"))
+    def test_scroll_raises_instead_of_masquerading_as_empty_store(self, _mock_urlopen):
+        with self.assertRaisesRegex(RuntimeError, "Qdrant unavailable"):
+            mem._scroll(scope="projA")
 
     @patch("mem._scroll")
     @patch("config.get_memory")

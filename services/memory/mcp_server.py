@@ -35,6 +35,7 @@ from mcp.server.fastmcp import FastMCP
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import get_memory  # noqa: E402
 from mcp_transport import ConfigError, build_server, transport_from  # noqa: E402
+from memory_store import read_inventory  # noqa: E402
 
 # stdio unless told otherwise, so the existing local Claude Code registration
 # keeps working untouched. See mcp_transport.py for the HTTP mode. A misconfigured
@@ -386,13 +387,8 @@ def list_memories(scope: str = "", agent: str = "", include_superseded: bool = F
         agent: Restrict to one agent/surface. Leave empty for any.
         include_superseded: Include superseded historical memories (default False).
     """
-    # get_all()'s cap is the keyword-only `top_k` (default 20) — NOT `limit`, which
-    # lands in **kwargs and is silently ignored. Without this the tool quietly shows
-    # a fraction of the store and looks like nothing was ever saved.
-    res = _mem().get_all(
-        filters=_scoped_filters(scope or None, agent or None), top_k=LIST_MAX
-    )
-    items = res.get("results", [])
+    items = read_inventory(owner=OWNER, scope=scope or None, agent=agent or None,
+                           include_superseded=True)
     if not items:
         where = f" in scope '{scope}'" if scope else ""
         return f"No memories stored{where}."
@@ -405,7 +401,11 @@ def list_memories(scope: str = "", agent: str = "", include_superseded: bool = F
         return f"No active memories stored{where}."
 
     items.sort(key=lambda i: i.get("created_at") or "")
-    return "\n".join(_attr_line(i) for i in items)
+    shown = items[:LIST_MAX]
+    lines = [_attr_line(item) for item in shown]
+    if len(items) > LIST_MAX:
+        lines.append(f"[TRUNCATED] Showing {LIST_MAX} of {len(items)} memories; narrow scope or agent to see fewer.")
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -513,14 +513,12 @@ def list_available_skills(task_context: str = "") -> str:
 
 @mcp.tool()
 def execute_with_harness(task: str, scope: str = "personal", verify_command: str = "") -> str:
-    """Run an agent task through the evaluation and safety harness.
-    Pre-checks command safety, injects relevant memories, rules, and skills,
-    records execution trajectory, and triggers self-reflexion if verification fails.
+    """Prepare scoped context and record a trajectory without executing the task.
 
     Args:
         task: The task description or goal for the agent.
         scope: Memory and rule scope (default: 'personal').
-        verify_command: Optional bash test/verification command to evaluate task outcome.
+        verify_command: Deprecated compatibility argument; never executed.
     """
     import harness
     result = harness.run_harness_task(
@@ -530,30 +528,23 @@ def execute_with_harness(task: str, scope: str = "personal", verify_command: str
     )
     status = result.get("status", "unknown").upper()
     run_id = result.get("run_id", "")
-    safety = "PASS" if result.get("safety_passed") else "BLOCKED"
-
     output = [
         f"Harness Execution [{status}] (run_id: {run_id})",
-        f"Safety Pre-Check: {safety}",
+        "Safety Review: NOT PERFORMED (task execution is disabled)",
+        "Task Execution: NOT PERFORMED (no trusted executor is configured)",
+        "Verification: NOT RUN",
     ]
 
-    if result.get("safety_violation"):
-        output.append(f"Safety Violation: {result.get('safety_violation')}")
-
-    if verify_command:
-        ver_status = "PASS" if result.get("verification_passed") else "FAIL"
-        output.append(f"Verification ({verify_command}): {ver_status}")
-        if result.get("verification_output"):
-            output.append(f"Verification Output:\n{result.get('verification_output').strip()}")
-
-    if result.get("reflexion_triggered"):
-        output.append("[REFLEXION] Verification failed. Self-correction memory recorded.")
+    if result.get("message"):
+        output.append(result["message"])
 
     context = result.get("context", {})
     output.append(
-        f"Assembled Context: {len(context.get('memories', []))} memories, "
-        f"{len(context.get('rules', []))} rules, {len(context.get('skills', []))} skills, "
-        f"{len(context.get('graph_nodes', []))} graph nodes."
+        "Context availability: "
+        f"memories={bool(context.get('memories'))}, "
+        f"rules={bool(context.get('rules'))}, skills={bool(context.get('skills'))}, "
+        f"graph_nodes={len(context.get('graph', []))}; "
+        f"context_status={context.get('status', 'unknown')}"
     )
 
     return "\n".join(output)
@@ -570,27 +561,34 @@ def compact_memories(scope: str = "personal", dry_run: bool = True) -> str:
         dry_run: If True, previews clusters and synthesis without modifying storage (default: True).
     """
     import compaction
-    client = _mem()
-    owner = os.environ.get("MEM0_OWNER", "default")
-    try:
-        all_mem = client.get_all(user_id=owner) or []
-        if scope:
-            all_mem = [m for m in all_mem if m.get("run_id") == scope]
-    except Exception:
-        all_mem = []
-
-    res = compaction.compact_scope(scope=scope, dry_run=dry_run, memories=all_mem)
-    mode = "[DRY-RUN]" if res["dry_run"] else "[APPLIED]"
+    if not (scope or "").strip():
+        raise ValueError("scope is required for memory compaction")
+    res = compaction.compact_scope(scope=scope, dry_run=dry_run)
+    mode = {
+        "preview": "[DRY-RUN]",
+        "completed": "[APPLIED]",
+        "partial": "[PARTIAL]",
+        "error": "[FAILED]",
+        "no-op": "[NO-OP]",
+    }.get(res.get("status"), "[DRY-RUN]" if res["dry_run"] else "[APPLIED]")
     lines = [
         f"Memory Compaction {mode} for scope '{scope}':",
-        f"Found {res['clusters_found']} clusters ({res['memories_compacted']} memories compacted)."
+        (f"Found {res['clusters_found']} clusters ({res.get('would_supersede', res['memories_compacted'])} memories would be superseded)."
+         if res["dry_run"] else
+         f"Found {res['clusters_found']} clusters ({res['memories_compacted']} memories superseded).")
     ]
 
     for i, s in enumerate(res.get("syntheses", []), 1):
-        lines.append(f"\nCluster #{i} ({s.get('count', 0)} memories -> {', '.join(s.get('superseded_ids', []))}):")
+        lines.append(f"\nCluster #{i} [{s.get('status', 'unknown')}] ({s.get('count', 0)} memories -> {', '.join(s.get('superseded_ids', []))}):")
         lines.append(s.get("synthesis", "").strip())
         if s.get("new_id"):
             lines.append(f"-> Created Synthesis Memory ID: {s['new_id']}")
+        if s.get("error"):
+            lines.append(f"-> Error: {s['error']}")
+        if s.get("graph_error"):
+            lines.append(f"-> Knowledge graph update failed: {s['graph_error']}")
+        for failure in s.get("supersession_errors", []):
+            lines.append(f"-> Failed to supersede {failure['id']}: {failure['error']}")
 
     return "\n".join(lines)
 
@@ -606,26 +604,23 @@ def sweep_stale_memories(scope: str = "personal", workspace_dir: str = "", dry_r
         dry_run: If True, previews stale memories without modifying their status (default: True).
     """
     import compaction
-    client = _mem()
-    owner = os.environ.get("MEM0_OWNER", "default")
-    try:
-        all_mem = client.get_all(user_id=owner) or []
-        if scope:
-            all_mem = [m for m in all_mem if m.get("run_id") == scope]
-    except Exception:
-        all_mem = []
-
+    if not (scope or "").strip():
+        raise ValueError("scope is required for stale memory sweeping")
     res = compaction.sweep_stale_memories(
         scope=scope,
         workspace_dir=workspace_dir or None,
         dry_run=dry_run,
-        memories=all_mem,
     )
-    mode = "[DRY-RUN]" if res["dry_run"] else "[APPLIED]"
+    mode = {
+        "preview": "[DRY-RUN]", "completed": "[APPLIED]", "partial": "[PARTIAL]",
+        "error": "[FAILED]", "no-op": "[NO-OP]",
+    }.get(res.get("status"), "[DRY-RUN]" if res["dry_run"] else "[APPLIED]")
     lines = [
         f"Staleness Sweeper {mode} for scope '{scope}':",
         f"Audited against workspace: {res['workspace_dir']}",
-        f"Stale memories found: {res['stale_count']}",
+        (f"Stale memories found: {res['stale_count']} (would update {res['stale_count']})."
+         if res["dry_run"] else
+         f"Stale memories found: {res['stale_count']} (updated {res.get('updated_count', 0)}, failed {res.get('failed_count', 0)})."),
     ]
 
     for c in res.get("candidates", []):
@@ -633,6 +628,8 @@ def sweep_stale_memories(scope: str = "personal", workspace_dir: str = "", dry_r
         missing = ", ".join(c.get("missing_files", []))
         lines.append(f"- [{mid}] Missing file(s): {missing}")
         lines.append(f"  Snippet: {c.get('memory', '')[:80]}...")
+        if "update_error" in c:
+            lines.append(f"  Update failed: {c['update_error']}")
 
     return "\n".join(lines)
 
@@ -647,14 +644,8 @@ def get_memory_health(scope: str = "personal", workspace_dir: str = "") -> str:
         workspace_dir: Absolute path to workspace root (default: current directory).
     """
     import ide_bridge
-    client = _mem()
     owner = os.environ.get("MEM0_OWNER", "default")
-    try:
-        all_mem = client.get_all(user_id=owner) or []
-        if scope:
-            all_mem = [m for m in all_mem if m.get("run_id") == scope]
-    except Exception:
-        all_mem = []
+    all_mem = read_inventory(owner=owner, scope=scope or None, include_superseded=True)
 
     res = ide_bridge.evaluate_health_score(
         scope=scope,

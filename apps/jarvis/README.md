@@ -1,21 +1,13 @@
-# DesktopAgent — Jarvis and ARDA Core
+# Jarvis — macOS & Linux Desktop AI Assistant
 
-This repository brings together a local-first desktop assistant and an experimental
-agent runtime. The desktop application is named **Jarvis**; its Python package remains
-`arda` for historical compatibility.
+**Jarvis**, macOS ve Linux için geliştirilmiş yerel-öncelikli (local-first) bir masaüstü yapay zeka asistanı ve sınırlı/güvenli (bounded) ajan çalışma ortamıdır.
 
-- **Jarvis desktop app** — push-to-talk voice assistant for macOS, with a Raspberry Pi/Linux daemon mode.
-- **ARDA Core** — task intake, execution, verification, evaluation, and memory components for bounded agent work.
-- **Hermes integration** — an experimental provider and execution bridge. It is not a claim that production multi-agent orchestration is complete.
-- **Shared memory** — the optional `mem0ai` adapter connects to a separately installed local mem0/Qdrant service; that service and its data are not included here.
+- **Jarvis Desktop:** macOS menü çubuğunda bas-konuş (`⌘⇧A`), yüzen dikte amblemi (`⌘⇧D`) ve sistem eylemleri.
+- **ARDA Core:** Bounded execution; araç kullanımında `AUTO / CONFIRM / DENY` izin politikası, adım doğrulama ve denetim logları.
+- **Linux/Raspberry Pi:** Headless daemon modu ve offline Vosk konuşma tanıma.
+- **Opsiyonel Paylaşımlı Bellek:** `services/memory` (mem0 + Qdrant) ile MCP üzerinden uzun vadeli bağlam yönetimi.
 
-See the [documentation index](docs/README.md) for architecture, operational guides, and the status of experimental components.
-
-## Project status
-
-The repository contains code at different maturity levels. The desktop assistant is the historical base application; ARDA Core and Hermes work is evolving and should be treated as experimental unless a specific component has an acceptance report. Hardware, external providers, and local service integrations require separate setup. Tests do not by themselves verify those external paths.
-
-The root-level `ARDA_*`, `HERMES_*`, `SPEC.md`, and related design documents preserve the development history. They are design and acceptance records, not a guarantee that every proposed capability is available in a production deployment.
+Mimari detaylar ve operasyonel kılavuzlar için [docs/README.md](docs/README.md) dizinine, arşivlenmiş spesifikasyonlar için [`docs/specs/`](docs/specs/README.md) dizinine bakın.
 
 For durable operational job cards backed by the Core event registry, see the
 [Tracked Jobs API](TRACKED_JOBS_API.md).
@@ -35,7 +27,7 @@ Varsayılan **push-to-talk** (⌘⇧A): bas → konuş → Jarvis ne istediğini
 
 Raspberry Pi/Linux üzerinde menubar yerine headless `daemon` modu ve offline Vosk STT
 kullanılabilir. Kurulum örneği için [`scripts/install_rpi_service.sh`](scripts/install_rpi_service.sh)
-dosyasına bakın; fiziksel Pi doğrulaması bu kaynak paketi hazırlanırken yapılamadı.
+dosyasına bakın.
 
 > Varsayılan olarak **her zaman dinlemez** — mikrofon yalnızca sen tetikleyince açılır.
 > İsteğe bağlı wake word (her-zaman-dinle) menüden açılabilir (sürekli mic + kendi .onnx modeli).
@@ -43,8 +35,9 @@ dosyasına bakın; fiziksel Pi doğrulaması bu kaynak paketi hazırlanırken ya
 > **Not:** Kullanıcıya görünen ad **Jarvis**'tir; iç Python paketi tarihsel olarak
 > `arda` adını korur (importlar değişmedi).
 
-- **Plan:** `Arda-Asistan-Proje-Plani.md`
+- **Plan:** [`docs/specs/Arda-Asistan-Proje-Plani.md`](docs/specs/Arda-Asistan-Proje-Plani.md)
 - **Teknik spec + karar günlüğü:** `SPEC.md`
+- **Tüm Spesifikasyonlar & Kontratlar:** [`docs/specs/`](docs/specs/README.md)
 
 ## Durum
 Çekirdek + Siri yönlendirici tamam (TDD, kapsamlı test paketi): push-to-talk tetik, beyin

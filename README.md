@@ -1,105 +1,125 @@
-# ARDA Suite
+<p align="center">
+  <img src="assets/banner.svg" alt="ARDA Suite Banner" width="100%" />
+</p>
 
-**Local-first assistant infrastructure, bounded agent execution, and optional shared memory.**
+<p align="center">
+  <img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python 3.11+" />
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Raspberry%20Pi-lightgrey.svg" alt="Platforms" />
+  <img src="https://img.shields.io/badge/memory-mem0%20%2B%20Qdrant-brightgreen.svg" alt="Memory" />
+  <img src="https://img.shields.io/badge/protocol-MCP%20HTTP-orange.svg" alt="MCP" />
+  <img src="https://img.shields.io/badge/security-bounded%20execution-purple.svg" alt="Security" />
+</p>
 
-ARDA Suite brings three related but independently deployable components into one source repository: **Jarvis**, a desktop and Linux assistant; **ARDA Core/Hermes**, experimental task and runtime infrastructure; and **Shared Memory**, an optional memory service. Each component keeps its own Python environment and deployment lifecycle.
+---
 
-This is an engineering work in progress, not a production-ready autonomous multi-agent platform.
+**ARDA Suite** is a modular, privacy-first AI assistant and bounded agent runtime. It bridges the gap between **user intent and safe execution**—combining a desktop voice assistant, explicit human-in-the-loop permission boundaries, and an independent shared memory daemon.
 
-## The engineering problem
+Each component is independently deployable with its own Python environment and isolated lifecycle.
 
-An agent that returns a plausible answer is different from one that can safely change files or call tools. ARDA explores the engineering between **intent and action**: permission gates, constrained execution, verification, audit trails, and persistent context.
+<p align="center">
+  <img src="assets/architecture-flow.svg" alt="ARDA Suite Architecture Flow" width="100%" />
+</p>
 
-```mermaid
-flowchart TD
-    A[Voice or task input] --> B[Jarvis and ARDA Core]
-    B --> C[Plan and select capability]
-    C --> D{Permission boundary}
-    D -->|Allow or human approval| E[Tool execution]
-    D -->|Deny| F[Recorded refusal]
-    E --> G[Verification and audit]
-    B -. Optional memory adapter .-> H[Shared Memory service]
-    H --> I[Authenticated MCP HTTP and local API]
-    I --> J[(Qdrant)]
-    I --> K[Ollama by default; hosted provider only if configured]
-```
+---
 
-## Engineering evidence
+## Key Pillars
 
-| Question | Implementation and evidence |
-| --- | --- |
-| How are tool calls permissioned? | [Permission policy](apps/jarvis/arda/agent_permission.py), [tool registry](apps/jarvis/arda/agent_tools.py), [permission tests](apps/jarvis/tests/test_agent_permission.py) |
-| How does a multi-step task run and get observed? | [Executor](apps/jarvis/arda/agent_executor.py), [step verifier](apps/jarvis/arda/agent_verifier.py), [audit log](apps/jarvis/arda/agent_audit.py) |
-| Where is task state coordinated? | [Control plane](apps/jarvis/arda/control_plane.py), [execution bridge](apps/jarvis/arda/execution_bridge.py) |
-| How do clients authenticate to Shared Memory? | [MCP transport](services/memory/mcp_transport.py), [transport tests](services/memory/test_mcp_transport.py) |
-| How is memory kept outside the application lifecycle? | [Memory service](services/memory/mcp_server.py), [component and data boundaries](docs/PRODUCT_LAYOUT.md) |
-| Which design decisions are documented? | [Jarvis architecture](apps/jarvis/docs/ARCHITECTURE.md), [ARDA Core spec](apps/jarvis/ARDA_CORE_V0_1_SPEC.md), [Hermes orchestration contract](apps/jarvis/HERMES_V0_1_ORCHESTRATION_CONTRACT.md) |
+- 🎙️ **Jarvis Desktop Assistant (`apps/jarvis`)**
+  - **Voice & Push-to-Talk (`⌘⇧A`)**: macOS menu bar voice assistant with instant push-to-talk and optional wake word.
+  - **Wispr Flow-Style Dictation (`⌘⇧D`)**: Floating dictation emblem that transcribes spoken voice directly into the active cursor in any app.
+  - **Desktop Automations & Notes**: Native macOS system control (apps, volume, timer, screen lock) and automatic Obsidian vault task sync.
+  - **Cross-Platform**: Headless background daemon mode for Linux and Raspberry Pi with offline speech recognition (Vosk).
+  - **Packaging**: Builds directly into native macOS `.app` bundle or distributable `.dmg` (`make app`, `make dmg`).
 
-These links point to implementation and design evidence. They do not establish that every path has been validated on physical hardware.
+- 🛡️ **Verifiable Bounded Execution (`apps/jarvis/arda`)**
+  - **Permission Gates**: Every tool invocation is governed by an explicit `AUTO / CONFIRM / DENY` policy.
+  - **Step Verification & Audit Trails**: Multi-step plans are verified and logged; high-risk actions require human sign-off.
+  - **Local-First Privacy**: Powered by local Ollama models by default; cloud LLM providers are strictly opt-in.
 
-## Components and maturity
+- 🧠 **Persistent Shared Memory (`services/memory`)**
+  - Standalone service using [mem0](https://github.com/mem0ai/mem0) and [Qdrant](https://qdrant.tech/) vector storage.
+  - Standardized **Model Context Protocol (MCP)** interface with bearer-token authentication.
+  - Real-time management dashboard, automated compaction, and retrieval evaluation harness.
 
-| Component | Location | Scope and maturity |
-| --- | --- | --- |
-| **Jarvis** | [`apps/jarvis/`](apps/jarvis/) | Existing macOS voice and desktop assistant, with an optional Linux daemon path |
-| **ARDA Core/Hermes** | [`apps/jarvis/arda/`](apps/jarvis/arda/) | Experimental task intake, execution, provider bridge, and evaluation modules; production multi-agent orchestration is not claimed |
-| **Shared Memory** | [`services/memory/`](services/memory/) | Optional mem0/Qdrant-backed storage, MCP transport, dashboard, and maintenance tools |
+---
 
-The components have separate Python environments. Jarvis does not import the memory service's source tree. See the [product layout and data policy](docs/PRODUCT_LAYOUT.md).
+## Architecture & Components
 
-## Operating and security boundaries
+| Component | Directory | Focus & Capabilities |
+| :--- | :--- | :--- |
+| **Jarvis Assistant** | [`apps/jarvis/`](apps/jarvis/) | Voice intake, macOS system actions, menu bar UI, Linux daemon |
+| **ARDA Core** | [`apps/jarvis/arda/`](apps/jarvis/arda/) | Task intake, permission gates, step verifier, execution bridge |
+| **Shared Memory** | [`services/memory/`](services/memory/) | Vector memory service, MCP server, web dashboard, evaluation tools |
 
-- Tool execution uses explicit **AUTO / CONFIRM / DENY** decision paths. A permission policy is not a verified OS sandbox.
-- Shared Memory MCP HTTP and dashboard listeners bind to loopback by default. HTTP MCP requires bearer-token authentication. See the [transport implementation](services/memory/mcp_transport.py) and [security policy](SECURITY.md).
-- The Pi installer now creates a local Ollama configuration by default and fails if model downloads, local Qdrant/Ollama readiness checks, or the initial memory health command fail. See the [Pi installer](services/memory/scripts/install-pi.sh) and [memory component guide](services/memory/README.md).
-- Hosted LLM providers are opt-in. When configured, memory extraction content is sent to that provider; keep credentials in the ignored private config or OS secret store.
-- Source control excludes private memory contents, runtime databases, tokens, model weights, and machine-specific settings. This repository is not a backup of live systems.
+The components communicate across documented API and MCP boundaries. Jarvis does not import the memory service source tree, ensuring clean separation of concerns. See [Product Layout & Data Policy](docs/PRODUCT_LAYOUT.md).
 
-## Run and evaluate
+---
 
-Use separate environments for Jarvis and Shared Memory. From the repository root:
+## Quickstart
 
-```bash
-make test-jarvis
-make test-memory
-make check-shell
-```
-
-The current GitHub Actions workflow checks shell syntax and the Shared Memory Pi installer safety tests. It does not run the full combined test suites.
-
-For the macOS Jarvis development setup:
+### 1. macOS: Jarvis Desktop Assistant
 
 ```bash
 cd apps/jarvis
+
+# Setup virtual environment and dependencies
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+
+# Configure local environment
 cp config.local.example.yaml config.local.yaml
 make test
 ```
 
-Fill in local paths and any provider credentials in the ignored `apps/jarvis/config.local.yaml`. See the [Jarvis guide](apps/jarvis/README.md) for microphone permissions and app usage.
+> **Tip:** You can also run `./install.sh` inside `apps/jarvis/` for automated setup of prerequisites (Homebrew, Ollama models, and audio dependencies). See the [Jarvis Guide](apps/jarvis/README.md) for microphone configuration.
 
-For Raspberry Pi/Linux installation, follow the [Pi setup guide](services/memory/docs/RASPBERRY-PI-SETUP.md) and install Jarvis separately. Review the existing host's Docker, systemd, memory ownership, and provider settings before upgrading it.
+### 2. Linux / Raspberry Pi: Shared Memory Service
 
-## Known limits and validation status
+```bash
+cd services/memory
 
-- **Physical Pi not inventoried:** the Raspberry Pi was unreachable when this repository was assembled. Its live service configuration, database ownership, and repository inventory have not been verified.
-- **Full-suite status:** the full combined Jarvis and Shared Memory suites have not been run for this portfolio snapshot. The focused installer safety check and shell syntax workflow have passed.
-- **Runtime maturity:** contracts, tests, and modules do not establish end-to-end autonomous reliability or effective OS sandbox isolation.
-- **Deployment claims:** a passing local test or CI run does not prove production readiness or Raspberry Pi performance.
-
-## Repository map
-
-```text
-apps/jarvis/        Jarvis assistant, ARDA Core, Hermes bridge, tests
-services/memory/    Shared Memory / MCP, dashboard, tests, installers
-docs/               Packaging, data ownership, and deployment boundaries
-SECURITY.md         Private vulnerability reporting
+# Run automated service installer (Docker, Qdrant, Ollama, systemd)
+./scripts/install-pi.sh
 ```
 
-**Reviewer starting points:** [permission boundary](apps/jarvis/arda/agent_permission.py) · [execution bridge](apps/jarvis/arda/execution_bridge.py) · [MCP transport](services/memory/mcp_transport.py) · [tests](apps/jarvis/tests/) · [data policy](docs/PRODUCT_LAYOUT.md).
+Review the [Shared Memory Guide](services/memory/README.md) and [Raspberry Pi Setup](services/memory/docs/RASPBERRY-PI-SETUP.md) for configuration details.
 
 The goal is to make execution behavior inspectable, bounded, and testable—not just convincing in a demo.
 
-Interested in contributing? Start with the [contribution guide](CONTRIBUTING.md).
+---
+
+## Development & Verification
+
+Run tests and linting from the repository root:
+
+```bash
+# Verify shell scripts
+make check-shell
+
+# Run Jarvis test suite
+make test-jarvis
+
+# Run Shared Memory test suite
+make test-memory
+```
+
+---
+
+## Technical Documentation & Specifications
+
+For in-depth architectural specifications, ADRs, and verification records:
+
+- 📚 **Documentation Index:** [Guides by component and task](docs/README.md)
+- 📐 **Architecture Deep Dive:** [Jarvis Architecture](apps/jarvis/docs/ARCHITECTURE.md)
+- 📋 **Engineering Evidence & Design Matrix:** [Engineering Notes](docs/ENGINEERING_NOTES.md)
+- 📑 **Specifications & Contracts Archive:** [ARDA Core & Hermes Specs](apps/jarvis/docs/specs/README.md)
+- 🔒 **Security & Boundary Policies:** [SECURITY.md](SECURITY.md)
+- 📦 **Component Boundaries & Data Ownership:** [Product Layout](docs/PRODUCT_LAYOUT.md)
+
+---
+
+## License & Contributing
+
+Built for local-first, verifiable AI assistance. Interested in contributing? Start with the [contribution guide](CONTRIBUTING.md). Please report any security vulnerabilities responsibly according to our [Security Policy](SECURITY.md).
+
