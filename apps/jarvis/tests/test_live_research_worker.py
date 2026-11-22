@@ -75,7 +75,7 @@ def test_configured_route_and_project_evidence_memory_are_used_in_live_worker(tm
     memories.add(EvidenceMemoryRecord(
         "prior", "arda", "Arda previously validated source integrity.",
         "https://example.com/prior", "a" * 64,
-        "2026-10-10T00:00:00Z", "2026-11-10T00:00:00Z",
+        "2026-10-10T00:00:00Z", "2099-01-01T00:00:00Z",
     ))
     model = ModelFixture()
     route = RoutedModelGateway(
