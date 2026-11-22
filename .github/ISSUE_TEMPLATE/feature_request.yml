@@ -1,0 +1,55 @@
+name: Feature proposal
+description: Propose a problem to solve or an improvement to ARDA Suite
+title: "[Proposal]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues first. Feature proposals are discussed before implementation, especially when they affect multiple components, permissions, security, data ownership, or public APIs.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Jarvis / ARDA Core
+        - Shared Memory
+        - Installer or deployment
+        - Documentation
+        - Cross-component / unsure
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What user or maintainer problem exists today? Include a concrete example.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the observable result and how success could be checked.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Suggested scope and boundaries
+      description: Which component should change? Mention security, permissions, data, compatibility, or deployment effects.
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds or simpler approaches have you considered?
+    validations:
+      required: false
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I may be interested in implementing this after the scope is agreed.
+          required: false
