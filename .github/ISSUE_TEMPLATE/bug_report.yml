@@ -1,0 +1,62 @@
+name: Bug report
+description: Report a reproducible problem in ARDA Suite
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues first. Do not include credentials, private memory, user data, transcripts, databases, or unredacted logs. For security vulnerabilities, use the private reporting instructions in [SECURITY.md](https://github.com/yunusarda-sudo/arda-suite/blob/main/SECURITY.md).
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Where did you observe the problem?
+      options:
+        - Jarvis / ARDA Core
+        - Shared Memory
+        - Installer or deployment
+        - Documentation
+        - Other / unsure
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the problem and what you expected instead.
+      placeholder: A concise description of the observed and expected behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include the smallest repeatable set of steps. Remove private data and secrets.
+      placeholder: |
+        1. Configure ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Revision or version
+      description: Provide a commit hash, release, or branch when known.
+    validations:
+      required: false
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment and relevant checks
+      description: OS, Python version, component setup, and checks already run.
+    validations:
+      required: false
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted evidence
+      description: Add a short error message or screenshot if useful. Remove credentials, personal data, paths, and private service output.
+      render: text
+    validations:
+      required: false
