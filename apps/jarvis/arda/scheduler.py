@@ -34,6 +34,7 @@ class Scheduler:
         tick_timeout_seconds: int = 300,
         github_sync=None,
         github_repos: dict[str, str] | None = None,
+        director=None,
     ):
         self.db = db
         self.clock = clock
@@ -41,12 +42,15 @@ class Scheduler:
         self.events = EventLog(db, clock)
         self.github_sync = github_sync
         self.github_repos = dict(github_repos or {})
+        self.director = director
 
     def install_defaults(self, *, run_immediately: bool = False) -> None:
         now = self.clock()
         defaults = self.DEFAULTS
         if self.github_sync and self.github_repos:
             defaults += (("github_sync", "GitHub read-only sync", "github_sync", 3600, None, None),)
+        if self.director is not None:
+            defaults += (("director_tick", "Autonomous Director", "director_tick", 600, None, None),)
         for schedule_id, name, kind, interval, hour, minute in defaults:
             next_run = now if run_immediately else self._next_run(now, interval, hour, minute)
             self.db.execute(
@@ -137,6 +141,8 @@ class Scheduler:
             self._morning_digest(now)
         elif kind == "github_sync":
             self._sync_github()
+        elif kind == "director_tick":
+            self._run_director()
         else:
             raise ValueError(f"unknown schedule kind: {kind}")
         with self.db.transaction():
@@ -146,6 +152,22 @@ class Scheduler:
                 (_iso(now), tick_id),
             )
             self.events.append("scheduler.tick.completed", source="scheduler", source_id=tick_id)
+
+    def _run_director(self) -> None:
+        if self.director is None:
+            return
+        missions = self.db.execute(
+            "SELECT id, project_id FROM organization_missions WHERE status='active' AND expires_at>? ORDER BY id",
+            (_iso(self.clock()),),
+        ).fetchall()
+        for mission in missions:
+            result = self.director.run_once(mission["id"])
+            self.events.append(
+                "director.mission_tick.completed", project_id=mission["project_id"],
+                source="director", source_id=mission["id"],
+                payload={"state": result.get("state", "UNKNOWN"),
+                         "reason": result.get("reason", "")},
+            )
 
     def _sync_github(self) -> None:
         if not self.github_sync or not self.github_repos:
