@@ -35,11 +35,13 @@ def test_is_microphone_available():
 
 
 def test_permission_report():
-    with patch("arda.permissions.check_all_permissions", return_value={"accessibility": True, "microphone": True}):
+    with patch("arda.permissions.is_macos", return_value=True), \
+         patch("arda.permissions.check_all_permissions", return_value={"accessibility": True, "microphone": True}):
         rep = permissions.permission_report()
         assert "✅ Verildi" in rep
 
-    with patch("arda.permissions.check_all_permissions", return_value={"accessibility": False, "microphone": False}):
+    with patch("arda.permissions.is_macos", return_value=True), \
+         patch("arda.permissions.check_all_permissions", return_value={"accessibility": False, "microphone": False}):
         rep = permissions.permission_report()
         assert "Erişilebilirlik izni vermek için" in rep
         assert "Mikrofon izni vermek için" in rep
