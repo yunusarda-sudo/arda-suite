@@ -57,6 +57,17 @@ The components communicate across documented API and MCP boundaries. Jarvis does
 
 ## Quickstart
 
+### Run the tests
+
+```bash
+make setup-test-env # one-time; use TEST_PYTHON=python3.11 if needed
+make test-jarvis
+make test-memory
+make check-shell
+```
+
+GitHub Actions runs the full Jarvis and Shared Memory test suites as well as installer shell-safety checks. The test targets use their app-specific virtual environments; they do not silently fall back to a system Python with a different dependency set.
+
 ### 1. macOS: Jarvis Desktop Assistant
 
 ```bash

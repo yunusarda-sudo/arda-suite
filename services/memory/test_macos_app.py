@@ -4,6 +4,7 @@
 import os
 import plistlib
 from pathlib import Path
+import sys
 import unittest
 
 HERE = Path(__file__).resolve().parent
@@ -13,6 +14,8 @@ USER_APP_BUNDLE = Path.home() / "Applications" / "SharedBrain.app"
 
 class TestMacOSApp(unittest.TestCase):
 
+    @unittest.skipUnless(sys.platform == "darwin" and APP_BUNDLE.is_dir(),
+                         "requires a built macOS SharedBrain.app artifact")
     def test_app_bundle_structure(self):
         self.assertTrue(APP_BUNDLE.is_dir(), f"Bundle directory {APP_BUNDLE} missing")
         contents = APP_BUNDLE / "Contents"
@@ -22,6 +25,8 @@ class TestMacOSApp(unittest.TestCase):
         self.assertTrue((contents / "MacOS" / "SharedBrain").is_file())
         self.assertTrue((contents / "Resources" / "AppIcon.icns").is_file())
 
+    @unittest.skipUnless(sys.platform == "darwin" and APP_BUNDLE.is_dir(),
+                         "requires a built macOS SharedBrain.app artifact")
     def test_launcher_permissions(self):
         launcher = APP_BUNDLE / "Contents" / "MacOS" / "SharedBrain"
         self.assertTrue(os.access(launcher, os.X_OK), "SharedBrain launcher must be executable")
@@ -33,6 +38,8 @@ class TestMacOSApp(unittest.TestCase):
         self.assertIn("8899", content, "Should check Dashboard port")
         self.assertIn("#harness", content, "Should open direct to Harness Studio")
 
+    @unittest.skipUnless(sys.platform == "darwin" and APP_BUNDLE.is_dir(),
+                         "requires a built macOS SharedBrain.app artifact")
     def test_info_plist_validity(self):
         plist_path = APP_BUNDLE / "Contents" / "Info.plist"
         with open(plist_path, "rb") as f:
@@ -44,6 +51,8 @@ class TestMacOSApp(unittest.TestCase):
         self.assertEqual(pl.get("CFBundleIconFile"), "AppIcon")
         self.assertEqual(pl.get("CFBundleName"), "Shared Brain")
 
+    @unittest.skipUnless(sys.platform == "darwin" and APP_BUNDLE.is_dir(),
+                         "requires a built macOS SharedBrain.app artifact")
     def test_app_icon_exists_and_non_empty(self):
         icon_path = APP_BUNDLE / "Contents" / "Resources" / "AppIcon.icns"
         self.assertTrue(icon_path.stat().st_size > 1000, "AppIcon.icns should be a valid icon file (>1KB)")

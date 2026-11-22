@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Test runner for the repository's unittest and pytest suites.
+pytest>=8.0
