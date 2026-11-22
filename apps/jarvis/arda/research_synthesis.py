@@ -35,6 +35,18 @@ class ModelProviderError(SynthesisError):
     """The model provider failed without exposing provider secrets."""
 
 
+class ModelTransientError(ModelProviderError):
+    """A bounded retry or explicitly authorized provider fallback may help."""
+
+
+class ModelRateLimitedError(ModelTransientError):
+    """The provider rejected the request due to a temporary quota limit."""
+
+
+class ModelAuthenticationError(ModelProviderError):
+    """Provider authentication or authorization failed; fallback is not implicit."""
+
+
 class ModelBudgetError(SynthesisError):
     """The bounded model-call budget was exhausted."""
 
@@ -101,7 +113,7 @@ class BudgetedModelGateway:
             try:
                 response = _response(self.gateway.generate(**kwargs))
                 break
-            except ModelProviderError:
+            except ModelTransientError:
                 if attempts >= self.retries:
                     raise
                 attempts += 1
@@ -436,8 +448,16 @@ class OpenAICompatibleGateway:
         try:
             with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
                 data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429:
+                raise ModelRateLimitedError("model provider rate limited the request") from exc
+            if exc.code in {401, 403}:
+                raise ModelAuthenticationError("model provider rejected credentials") from exc
+            if exc.code >= 500:
+                raise ModelTransientError("model provider is temporarily unavailable") from exc
+            raise ModelProviderError("model provider rejected the request") from exc
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-            raise ModelProviderError("model provider request failed") from exc
+            raise ModelTransientError("model provider request failed") from exc
         try:
             choice = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
@@ -489,8 +509,16 @@ class OllamaNativeGateway:
             try:
                 with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
                     data = json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                if exc.code == 429:
+                    raise ModelRateLimitedError("model provider rate limited the request") from exc
+                if exc.code in {401, 403}:
+                    raise ModelAuthenticationError("model provider rejected credentials") from exc
+                if exc.code >= 500:
+                    raise ModelTransientError("model provider is temporarily unavailable") from exc
+                raise ModelProviderError("model provider rejected the request") from exc
             except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-                raise ModelProviderError("model provider request failed") from exc
+                raise ModelTransientError("model provider request failed") from exc
         try:
             content = data["message"]["content"]
         except (KeyError, TypeError) as exc:

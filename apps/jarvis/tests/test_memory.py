@@ -1,5 +1,5 @@
 import logging
-from arda.memory import MemoryStore, DEFAULT_COLLECTION, EMBED_DIMS
+from arda.memory import MemoryStore, DEFAULT_COLLECTION, DEFAULT_OWNER, EMBED_DIMS
 
 
 class FakeMem:
@@ -177,7 +177,7 @@ def test_enqueue_then_flush_writes_one_add_per_scope_with_messages():
     by_scope = {kw["run_id"]: (msgs, kw) for msgs, kw in fake.added}
     assert set(by_scope) == {"personal", "jarvis"}
     for _msgs, kw in fake.added:
-        assert kw["user_id"] == "default"
+        assert kw["user_id"] == DEFAULT_OWNER
         assert kw["agent_id"] == "jarvis"
     p_msgs, _ = by_scope["personal"]
     # 2 tur × (user+assistant) = 4 mesaj, doğru sırada

@@ -10,6 +10,9 @@ from arda.research_synthesis import (
     EvidenceBudgetError,
     EvidencePack,
     ModelOutputError,
+    ModelAuthenticationError,
+    ModelRateLimitedError,
+    ModelTransientError,
     ModelBudgetError,
     OpenAICompatibleGateway,
     OllamaNativeGateway,
@@ -207,6 +210,50 @@ def test_model_call_budget_is_enforced():
         gateway.generate(system_prompt="s", user_prompt="u", model="m", max_output_tokens=1, timeout_seconds=1)
 
 
+def test_budgeted_gateway_retries_transient_errors_but_not_auth_errors():
+    class FailsOnce:
+        def __init__(self, error):
+            self.error = error
+            self.calls = 0
+
+        def generate(self, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise self.error
+            return {"content": "ok", "model": "fixture"}
+
+    transient = FailsOnce(ModelTransientError("offline"))
+    BudgetedModelGateway(transient, max_calls=2, retries=1).generate(
+        system_prompt="s", user_prompt="u", model="m", max_output_tokens=1, timeout_seconds=1,
+    )
+    assert transient.calls == 2
+
+    denied = FailsOnce(ModelAuthenticationError("denied"))
+    with pytest.raises(ModelAuthenticationError):
+        BudgetedModelGateway(denied, max_calls=2, retries=1).generate(
+            system_prompt="s", user_prompt="u", model="m", max_output_tokens=1, timeout_seconds=1,
+        )
+    assert denied.calls == 1
+
+
 def test_gateway_rejects_credential_bearing_endpoint():
     with pytest.raises(ValueError):
         OpenAICompatibleGateway("https://user:password@llm.example.test/v1", api_key="x")
+
+
+@pytest.mark.parametrize(("status", "expected"), [
+    (401, ModelAuthenticationError), (403, ModelAuthenticationError), (429, ModelRateLimitedError),
+])
+def test_openai_compatible_http_failures_are_classified_without_response_body(monkeypatch, status, expected):
+    import urllib.error
+    import urllib.request
+
+    def reject(*_args, **_kwargs):
+        raise urllib.error.HTTPError("https://llm.example.test", status, "provider detail", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", reject)
+    gateway = OpenAICompatibleGateway("https://llm.example.test/v1", api_key="secret")
+    with pytest.raises(expected) as failure:
+        gateway.generate(system_prompt="s", user_prompt="u", model="m", max_output_tokens=8,
+                         timeout_seconds=1)
+    assert "provider detail" not in str(failure.value)
