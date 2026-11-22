@@ -15,7 +15,7 @@ from arda.research_synthesis import ModelGateway, render_synthesis_markdown, syn
 from arda.evidence_memory import EvidenceMemoryRecord, EvidenceMemoryStore
 from arda.model_routes import RoutedModelGateway, SQLiteModelRouteStore, build_routed_gateway
 from arda.core import Database
-from arda.worker_protocol import WorkerProtocolClient
+from arda.worker_protocol import WorkerCancellationRequested, WorkerLeaseGuard, WorkerProtocolClient
 
 
 @dataclass(frozen=True)
@@ -112,30 +112,38 @@ class LiveResearchWorker:
     def run_once(self, *, run_id: str) -> dict[str, Any]:
         claim = self.client.request("claim", {"job_type": "research"}, request_id=f"{run_id}:claim")
         lease = {"job_id": claim["job_id"], "lease_token": claim["lease_token"]}
+        guard = None
         try:
             self.client.request("start", lease, request_id=f"{run_id}:start")
-            job = self.client.request("describe", lease, request_id=f"{run_id}:describe")
-            spec = LiveResearchJob.from_objective(job["objective"], project_id=job.get("project_id"))
-            acquired = self.acquirer.acquire(spec.query, self.search, max_sources=spec.max_sources)
-            if not acquired.sources:
-                raise ResearchSourceError("live acquisition returned no valid sources")
-            source_refs = tuple(source.uri for source in acquired.sources)
-            deterministic = build_research(spec.objective_for_sources(source_refs), FixtureSourceAdapter({source.uri: source for source in acquired.sources}))
-            deterministic["acquisition_failures"] = list(acquired.failures)
-            memory_records = ()
-            if self.evidence_memory is not None and spec.project_id:
-                memory_records = self.evidence_memory.recall(spec.project_id, spec.query, limit=5)
-                _append_memory_evidence(deterministic, memory_records)
-            result = synthesize_research(
-                deterministic,
-                self.gateway,
-                model=self.model,
-                max_evidence=self.max_evidence,
-                max_excerpt_chars=self.max_excerpt_chars,
-                max_contract_retries=self.max_contract_retries,
-            )
-            if self.route_snapshot_hash:
-                result["synthesis"]["model_route_snapshot_sha256"] = self.route_snapshot_hash
+            with WorkerLeaseGuard(self.client, lease["job_id"], lease["lease_token"],
+                                  run_id=run_id) as guard:
+                job = self.client.request("describe", lease, request_id=f"{run_id}:describe")
+                spec = LiveResearchJob.from_objective(job["objective"], project_id=job.get("project_id"))
+                guard.ensure_current()
+                acquired = self.acquirer.acquire(spec.query, self.search, max_sources=spec.max_sources,
+                                                 cancel_event=guard.cancel_event)
+                guard.ensure_current()
+                if not acquired.sources:
+                    raise ResearchSourceError("live acquisition returned no valid sources")
+                source_refs = tuple(source.uri for source in acquired.sources)
+                deterministic = build_research(spec.objective_for_sources(source_refs), FixtureSourceAdapter({source.uri: source for source in acquired.sources}))
+                deterministic["acquisition_failures"] = list(acquired.failures)
+                memory_records = ()
+                if self.evidence_memory is not None and spec.project_id:
+                    memory_records = self.evidence_memory.recall(spec.project_id, spec.query, limit=5)
+                    _append_memory_evidence(deterministic, memory_records)
+                guard.ensure_current()
+                result = synthesize_research(
+                    deterministic,
+                    self.gateway,
+                    model=self.model,
+                    max_evidence=self.max_evidence,
+                    max_excerpt_chars=self.max_excerpt_chars,
+                    max_contract_retries=self.max_contract_retries,
+                )
+                guard.ensure_current()
+                if self.route_snapshot_hash:
+                    result["synthesis"]["model_route_snapshot_sha256"] = self.route_snapshot_hash
             json_bytes = canonical_json(result)
             markdown_bytes = render_synthesis_markdown(result).encode("utf-8")
             if len(json_bytes) + len(markdown_bytes) > self.max_output_bytes:
@@ -151,7 +159,10 @@ class LiveResearchWorker:
             return result
         except Exception as exc:
             try:
-                self.client.request("fail", {**lease, "error": exc.__class__.__name__, "retryable": isinstance(exc, (ResearchSourceError, ResearchBudgetError))}, request_id=f"{run_id}:fail")
+                if isinstance(exc, WorkerCancellationRequested) or (guard is not None and guard.cancellation_requested):
+                    self.client.request("cancel_ack", lease, request_id=f"{run_id}:cancel-ack")
+                else:
+                    self.client.request("fail", {**lease, "error": exc.__class__.__name__, "retryable": isinstance(exc, (ResearchSourceError, ResearchBudgetError))}, request_id=f"{run_id}:fail")
             except Exception:
                 pass
             raise

@@ -346,15 +346,22 @@ class LiveSourceAcquirer:
     def __init__(self, fetcher: SafeHTTPFetcher):
         self.fetcher = fetcher
 
-    def acquire(self, query: str, search: SearchAdapter, *, max_sources: int = 5) -> AcquisitionResult:
+    def acquire(self, query: str, search: SearchAdapter, *, max_sources: int = 5,
+                cancel_event=None) -> AcquisitionResult:
         if max_sources < 1:
             raise ValueError("max_sources must be positive")
+        if cancel_event is not None and cancel_event.is_set():
+            raise InterruptedError("worker lease lost before search")
         candidates = search.search(query, max_results=max_sources)
+        if cancel_event is not None and cancel_event.is_set():
+            raise InterruptedError("worker lease lost after search")
         seen_urls: set[str] = set()
         seen_content: set[str] = set()
         sources: list[FixtureSource] = []
         failures: list[dict[str, str]] = []
         for candidate in candidates:
+            if cancel_event is not None and cancel_event.is_set():
+                raise InterruptedError("worker lease lost during source acquisition")
             normalized_url = redact_url(candidate.url).rstrip("/").casefold()
             if normalized_url in seen_urls:
                 continue
@@ -366,6 +373,8 @@ class LiveSourceAcquirer:
             except LiveResearchError as exc:
                 failures.append({"url": redact_url(candidate.url), "error_class": exc.__class__.__name__})
                 continue
+            if cancel_event is not None and cancel_event.is_set():
+                raise InterruptedError("worker lease lost after source fetch")
             if fetched.content_sha256 in seen_content:
                 continue
             seen_content.add(fetched.content_sha256)

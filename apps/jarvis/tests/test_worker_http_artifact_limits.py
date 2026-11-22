@@ -17,7 +17,7 @@ def test_artifact_byte_limit_accepts_exact_limit_and_rejects_next_byte(
 ):
     db = Database(tmp_path / "artifact-limit.sqlite3")
     db.migrate()
-    WorkerRegistry(db).register("mac", "secret", public_key="fixture", capabilities=[])
+    WorkerRegistry(db).register("mac", "secret", public_key="fixture", capabilities=["test"])
     job = JobQueue(db).enqueue("test", "artifact limit", idempotency_key="artifact-limit")
     server = WorkerHTTPServer(db, max_artifact_bytes=limit if enforced_by == "server" else 100)
     server.start()

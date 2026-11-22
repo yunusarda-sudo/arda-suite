@@ -57,6 +57,8 @@ class AcceptanceCoordinator:
         with self.db.transaction():
             queue = JobQueue(self.db, clock=self.clock)
             job = queue._verify_lease(job_id, lease_token, ("running",))
+            if job["cancel_requested_at"] is not None:
+                raise AcceptanceConflict("job cancellation was requested before acceptance")
             if job["attempt_count"] != lease_generation:
                 raise StaleLeaseError(f"lease generation changed for {job_id}")
             task = self.db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
@@ -126,6 +128,8 @@ class AcceptanceCoordinator:
             job = JobQueue(self.db, clock=self.clock)._verify_lease(
                 intent["job_id"], lease_token, ("running",)
             )
+            if job["cancel_requested_at"] is not None:
+                raise AcceptanceConflict("job cancellation was requested before acceptance")
             if job["attempt_count"] != intent["lease_generation"]:
                 raise StaleLeaseError(f"lease generation changed for {intent['job_id']}")
             if not self._evidence_valid(intent):

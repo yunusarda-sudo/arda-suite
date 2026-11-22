@@ -9,7 +9,7 @@ def test_smoke_requires_explicit_fixture_claim_before_start(tmp_path):
     from arda.worker_transport_cli import smoke
     db = Database(tmp_path / 'core.sqlite3')
     db.migrate()
-    WorkerRegistry(db).register('mac', 'secret', public_key='fixture', capabilities=[])
+    WorkerRegistry(db).register('mac', 'secret', public_key='fixture', capabilities=['test'])
     job = JobQueue(db).enqueue('test', 'transport fixture', idempotency_key='smoke')
     server = WorkerHTTPServer(db)
     server.start()
@@ -26,7 +26,7 @@ def test_smoke_lifecycle_and_repeat_replay(tmp_path):
     from arda.worker_transport_cli import smoke
     db = Database(tmp_path / 'core.sqlite3')
     db.migrate()
-    WorkerRegistry(db).register('mac', 'secret', public_key='fixture', capabilities=[])
+    WorkerRegistry(db).register('mac', 'secret', public_key='fixture', capabilities=['test'])
     job = JobQueue(db).enqueue('test', 'transport fixture', idempotency_key='smoke')
     server = WorkerHTTPServer(db)
     server.start()

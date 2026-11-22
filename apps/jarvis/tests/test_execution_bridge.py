@@ -197,6 +197,77 @@ def test_heartbeat_failure_signals_cancellable_executor(tmp_path):
     assert outcome.result == WorkResult.INVALID.value
 
 
+def test_operator_cancellation_propagates_over_heartbeat_and_suppresses_candidate(tmp_path):
+    db_path = tmp_path / "core.sqlite3"
+    repo, baseline, candidate = make_repo(tmp_path)
+    setup_db(db_path)
+
+    class CancellablePassingExecutor:
+        def execute_cancellable(self, task, cancel_event):
+            db = bootstrap_runtime_database(db_path)
+            try:
+                job = db.execute("SELECT id FROM jobs WHERE type='autonomous-coding'").fetchone()
+                from arda.core import JobQueue
+                JobQueue(db).request_cancel(job["id"], requested_by="test-operator")
+            finally:
+                db.close()
+            assert cancel_event.wait(4)
+            return ExecutionResult(result=WorkResult.PASS.value, candidate_sha=candidate)
+
+    bridge = ExecutionBridge(db_path, CancellablePassingExecutor(), worker_id="worker-1", lease_seconds=3)
+    bridge.enqueue(make_task(repo, baseline), project_id="sample-project")
+
+    outcome = bridge.run_once()
+
+    assert outcome.result == "CANCELLED"
+    assert outcome.task_status == "cancelled"
+    assert subprocess.check_output(["git", "rev-parse", "refs/heads/accepted"], cwd=repo, text=True).strip() == baseline
+    db = bootstrap_runtime_database(db_path)
+    try:
+        assert db.execute("SELECT status FROM jobs").fetchone()[0] == "cancelled"
+        assert db.execute("SELECT status FROM tasks WHERE id='TASK-001'").fetchone()[0] == "cancelled"
+        assert db.execute("SELECT COUNT(*) FROM acceptance_intents").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] == 0
+    finally:
+        db.close()
+
+
+def test_expired_lease_with_pending_cancellation_is_not_requeued(tmp_path):
+    db_path = tmp_path / "core.sqlite3"
+    repo, baseline, candidate = make_repo(tmp_path)
+    setup_db(db_path)
+
+    class ExpiredCancellablePassingExecutor:
+        def execute_cancellable(self, task, cancel_event):
+            db = bootstrap_runtime_database(db_path)
+            try:
+                job = db.execute("SELECT id FROM jobs WHERE type='autonomous-coding'").fetchone()
+                from arda.core import JobQueue
+                JobQueue(db).request_cancel(job["id"], requested_by="test-operator")
+                expired = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+                db.execute("UPDATE jobs SET lease_expires_at=? WHERE id=?", (expired, job["id"]))
+            finally:
+                db.close()
+            return ExecutionResult(result=WorkResult.PASS.value, candidate_sha=candidate)
+
+    bridge = ExecutionBridge(db_path, ExpiredCancellablePassingExecutor(), worker_id="worker-1", lease_seconds=3)
+    bridge.enqueue(make_task(repo, baseline), project_id="sample-project")
+
+    outcome = bridge.run_once()
+    assert outcome.result == WorkResult.INVALID.value
+    # The expired owner cannot acknowledge, but Core recovery observes the durable
+    # request, closes the job, and repairs the task projection without redispatch.
+    assert bridge.run_once() is None
+    db = bootstrap_runtime_database(db_path)
+    try:
+        assert db.execute("SELECT status FROM jobs").fetchone()[0] == "cancelled"
+        assert db.execute("SELECT status FROM tasks WHERE id='TASK-001'").fetchone()[0] == "cancelled"
+        assert db.execute("SELECT COUNT(*) FROM acceptance_intents").fetchone()[0] == 0
+    finally:
+        db.close()
+    assert subprocess.check_output(["git", "rev-parse", "refs/heads/accepted"], cwd=repo, text=True).strip() == baseline
+
+
 def test_run_bounded_terminates_process_group_when_cancelled(tmp_path):
     from arda.hermes_sandbox import HermesPodmanTaskExecutor
 
