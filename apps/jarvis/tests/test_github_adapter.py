@@ -77,6 +77,25 @@ def test_issue_listing_excludes_pull_requests():
     ]
 
 
+def test_workflow_runs_are_read_only_bounded_and_normalized():
+    calls = []
+
+    def transport(path, params):
+        calls.append((path, params))
+        return {"workflow_runs": [{"id": 9, "name": "CI", "status": "completed",
+                                   "conclusion": "failure", "head_sha": "abc",
+                                   "run_attempt": 2, "updated_at": "2026-10-10T10:00:00Z"}]}
+
+    adapter = GitHubReadOnlyAdapter(transport=transport)
+    runs = adapter.list_workflow_runs("acme/sample-project", per_page=10)
+
+    assert runs[0]["id"] == 9
+    assert runs[0]["run_attempt"] == 2
+    assert calls == [("/repos/acme/sample-project/actions/runs", {"per_page": "10"})]
+    with pytest.raises(ValueError, match="per_page"):
+        adapter.list_workflow_runs("acme/sample-project", per_page=101)
+
+
 def test_sync_updates_only_provider_projection_and_emits_audit_event(db):
     class FakeAdapter:
         def get_repository(self, repo):

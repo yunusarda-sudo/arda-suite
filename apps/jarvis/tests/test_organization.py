@@ -1,10 +1,30 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
+import pytest
 
 from arda.awareness import ProjectRegistry, TaskStore
 from arda.core import bootstrap_runtime_database
 from arda.organization import OrganizationRegistry
+
+
+def _mission(registry, **overrides):
+    values = {
+        "project_id": "sample-project",
+        "title": "Stabilize OPVIA",
+        "objective": "Resolve verified delivery blockers",
+        "acceptance_metrics": ("CI green",),
+        "allowed_repositories": ("acme/opvia",),
+        "allowed_domains": ("github.com",),
+        "delegated_scopes": ("signals.read", "github.read", "coding.propose", "coding.execute"),
+        "allowed_risks": ("low", "medium"),
+        "budget": {"max_tasks": 4, "max_task_cost": 2},
+        "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+        "mission_id": "MISSION-OPVIA",
+    }
+    values.update(overrides)
+    return registry.create_mission(**values)
 
 
 def test_profile_objective_and_deterministic_ready_task_selection(tmp_path):
@@ -31,6 +51,140 @@ def test_profile_objective_and_deterministic_ready_task_selection(tmp_path):
         snapshot = registry.snapshot("sample-project")
         assert snapshot["profile"]["policy"]["secrets"] == "deny"
         assert snapshot["next_task"]["id"] == "TASK-HIGH"
+    finally:
+        db.close()
+
+
+def test_mission_signal_proposal_are_scoped_deduplicated_and_budgeted(tmp_path):
+    db = bootstrap_runtime_database(tmp_path / "core.sqlite3")
+    try:
+        ProjectRegistry(db).create("sample-project", "Sample Project")
+        registry = OrganizationRegistry(db)
+        mission = _mission(registry)
+        signal, inserted = registry.ingest_signal(
+            mission["id"], provider="github", source_key="actions-run:41:attempt:1",
+            signal_type="ci.failure", source_updated_at=datetime.now(timezone.utc).isoformat(),
+            payload={"repo": "acme/opvia", "head_sha": "a" * 40, "conclusion": "failure"},
+        )
+        duplicate, inserted_again = registry.ingest_signal(
+            mission["id"], provider="github", source_key="actions-run:41:attempt:1",
+            signal_type="ci.failure", source_updated_at=datetime.now(timezone.utc).isoformat(),
+            payload={"repo": "acme/opvia", "head_sha": "a" * 40, "conclusion": "failure"},
+        )
+        assert inserted is True
+        assert inserted_again is False
+        assert duplicate["id"] == signal["id"]
+        assert len(registry.pending_signals(mission["id"])) == 1
+
+        draft = {"repo": "acme/opvia", "objective": "Fix failing CI", "acceptance": ["CI passes"],
+                 "risk": "low", "estimated_cost": 1, "allowed_paths": ["src/**"]}
+        proposal, created = registry.record_proposal(
+            mission["id"], signal["id"], draft=draft,
+            rationale="A current CI run failed on the mission repository.", decision="accepted",
+        )
+        duplicate_proposal, created_again = registry.record_proposal(
+            mission["id"], signal["id"], draft=draft,
+            rationale="retry after restart", decision="accepted",
+        )
+        assert created is True
+        assert created_again is False
+        assert duplicate_proposal["id"] == proposal["id"]
+        assert proposal["status"] == "accepted"
+        assert json.loads(proposal["contract_json"]) == draft
+        assert db.execute("SELECT status FROM director_signals WHERE id=?", (signal["id"],)).fetchone()[0] == "processed"
+    finally:
+        db.close()
+
+
+def test_mission_rejects_unauthorized_signal_and_out_of_scope_proposal(tmp_path):
+    db = bootstrap_runtime_database(tmp_path / "core.sqlite3")
+    try:
+        ProjectRegistry(db).create("sample-project", "Sample Project")
+        registry = OrganizationRegistry(db)
+        mission = _mission(registry, delegated_scopes=("signals.read",))
+        try:
+            registry.ingest_signal(
+                mission["id"], provider="github", source_key="run:1", signal_type="ci.failure",
+                source_updated_at=datetime.now(timezone.utc).isoformat(),
+                payload={"repo": "acme/opvia"},
+            )
+        except ValueError as exc:
+            assert "delegate" in str(exc)
+        else:
+            raise AssertionError("GitHub signal was accepted without github.read scope")
+
+        mission = registry.create_mission(
+            "sample-project", "Second mission", "test scope", acceptance_metrics=("test",),
+            allowed_repositories=("acme/opvia",), delegated_scopes=("github.read", "coding.propose"),
+            expires_at=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            mission_id="MISSION-SECOND",
+        )
+        signal, _ = registry.ingest_signal(
+            mission["id"], provider="github", source_key="run:2", signal_type="ci.failure",
+            source_updated_at=datetime.now(timezone.utc).isoformat(), payload={"repo": "acme/opvia"},
+        )
+        row, created = registry.record_proposal(
+            mission["id"], signal["id"],
+            draft={"repo": "attacker/other", "objective": "escape", "acceptance": ["done"],
+                   "allowed_paths": ["src/**"], "risk": "low", "estimated_cost": 1},
+            rationale="untrusted proposal", decision="accepted",
+        )
+        assert created is True
+        assert row["status"] == "rejected"
+        assert json.loads(row["decision_json"])["reason"] == "REPOSITORY_OUT_OF_SCOPE"
+    finally:
+        db.close()
+
+
+def test_mission_pause_expiry_and_optimistic_state_transition(tmp_path):
+    db = bootstrap_runtime_database(tmp_path / "core.sqlite3")
+    try:
+        ProjectRegistry(db).create("sample-project", "Sample Project")
+        now = datetime.now(timezone.utc)
+        current = [now]
+        registry = OrganizationRegistry(db, clock=lambda: current[0])
+        mission = _mission(registry, expires_at=(now + timedelta(hours=1)).isoformat())
+        paused = registry.set_mission_state(mission["id"], "paused", expected_version=mission["version"], reason="operator pause")
+        assert paused["status"] == "paused"
+        assert registry.pending_signals(mission["id"]) == []
+        with pytest.raises(ValueError, match="cannot transition"):
+            registry.set_mission_state(mission["id"], "paused", expected_version=paused["version"], reason="again")
+        current[0] = now + timedelta(hours=2)
+        assert registry.mission(mission["id"])["status"] == "expired"
+    finally:
+        db.close()
+
+
+def test_signal_freshness_uses_source_timestamp_and_rejects_future_sources(tmp_path):
+    db = bootstrap_runtime_database(tmp_path / "core.sqlite3")
+    try:
+        ProjectRegistry(db).create("sample-project", "Sample Project")
+        now = datetime.now(timezone.utc)
+        registry = OrganizationRegistry(db, clock=lambda: now)
+        mission = _mission(registry, expires_at=(now + timedelta(days=1)).isoformat())
+        stale, inserted = registry.ingest_signal(
+            mission["id"], provider="github", source_key="run:stale", signal_type="ci.failure",
+            source_updated_at=(now - timedelta(hours=2)).isoformat(), payload={"repo": "acme/opvia"},
+            freshness_seconds=3600,
+        )
+        assert inserted is True
+        assert stale["status"] == "ignored"
+        assert registry.pending_signals(mission["id"]) == []
+        with pytest.raises(ValueError, match="future"):
+            registry.ingest_signal(
+                mission["id"], provider="github", source_key="run:future", signal_type="ci.failure",
+                source_updated_at=(now + timedelta(minutes=3)).isoformat(), payload={"repo": "acme/opvia"},
+            )
+    finally:
+        db.close()
+
+
+def test_mission_creation_rejects_string_instead_of_collection(tmp_path):
+    db = bootstrap_runtime_database(tmp_path / "core.sqlite3")
+    try:
+        ProjectRegistry(db).create("sample-project", "Sample Project")
+        with pytest.raises(ValueError, match="acceptance_metrics"):
+            _mission(OrganizationRegistry(db), acceptance_metrics="CI green")
     finally:
         db.close()
 
