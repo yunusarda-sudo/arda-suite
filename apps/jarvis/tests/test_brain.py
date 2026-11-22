@@ -459,6 +459,12 @@ def test_empty_profile_leaves_router_system_unchanged():
 def _ollama_up() -> bool:
     """Canlı testler için Ollama erişilebilir mi (localhost:11434)."""
     import socket
+    from pathlib import Path
+
+    # These live tests call load_config(); a listening Ollama without the
+    # developer's ignored local vault configuration is not a runnable setup.
+    if not (Path(__file__).resolve().parents[1] / "config.local.yaml").is_file():
+        return False
 
     try:
         with socket.create_connection(("localhost", 11434), timeout=0.5):
