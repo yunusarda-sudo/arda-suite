@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="ARDA Suite Banner" width="100%" />
+  <img src="assets/banner.svg" alt="AegisOS Banner" width="100%" />
 </p>
 
 <p align="center">
@@ -12,12 +12,12 @@
 
 ---
 
-**ARDA Suite** is a modular, privacy-first AI assistant and bounded agent runtime. It bridges the gap between **user intent and safe execution**—combining a desktop voice assistant, explicit human-in-the-loop permission boundaries, and an independent shared memory daemon.
+**AegisOS** is a modular, local-first AI assistant and bounded agent runtime. It bridges the gap between **user intent and safe execution**—combining a macOS desktop voice assistant, explicit human-in-the-loop permission boundaries, and an independent shared memory daemon.
 
 Each component is independently deployable with its own Python environment and isolated lifecycle.
 
 <p align="center">
-  <img src="assets/architecture-flow.svg" alt="ARDA Suite Architecture Flow" width="100%" />
+  <img src="assets/architecture-flow.svg" alt="AegisOS Architecture Flow" width="100%" />
 </p>
 
 ---
@@ -48,7 +48,7 @@ Each component is independently deployable with its own Python environment and i
 | Component | Directory | Focus & Capabilities |
 | :--- | :--- | :--- |
 | **Jarvis Assistant** | [`apps/jarvis/`](apps/jarvis/) | Voice intake, macOS system actions, menu bar UI, Linux daemon |
-| **ARDA Core** | [`apps/jarvis/arda/`](apps/jarvis/arda/) | Task intake, permission gates, step verifier, execution bridge |
+| **Aegis Core** | [`apps/jarvis/arda/`](apps/jarvis/arda/) | Task intake, permission gates, step verifier, execution bridge |
 | **Shared Memory** | [`services/memory/`](services/memory/) | Vector memory service, MCP server, web dashboard, evaluation tools |
 
 The components communicate across documented API and MCP boundaries. Jarvis does not import the memory service source tree, ensuring clean separation of concerns. See [Product Layout & Data Policy](docs/PRODUCT_LAYOUT.md).
