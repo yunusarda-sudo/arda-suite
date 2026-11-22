@@ -53,6 +53,7 @@ def _load_desktop_runtime() -> None:
     from arda.agent import AgentDeps, run_forever
     from arda.agent_executor import AgentRunDeps
     from arda.browser_adapter import CamofoxClient
+    from arda.browser_sessions import BrowserSessionRegistry, close_revoked_browser_tabs
     from arda.agent_skills import SkillError, select_skill
     from arda.agent_tools import ToolContext
     from arda.config import ConfigError, load_config
@@ -210,11 +211,51 @@ def _build_run_agent(cfg: dict, controls: Controls):
     # Denetim günlüğü: agent.log_dir (yoksa vault/AgentRuns) → "Jarvis dosyalarıma ne yaptı?"
     log_dir = agent_cfg.get("log_dir") or (Path(cfg["vault"]["path"]).expanduser() / "AgentRuns")
     browser_cfg = cfg.get("browser", {})
+    project_id = str(browser_cfg.get("project_id", "")).strip()
+    browser_session_id = str(browser_cfg.get("session_id", "")).strip()
+    browser_authorize = None
+    if project_id and browser_session_id:
+        def browser_authorize(url):
+            database = bootstrap_runtime_database()
+            try:
+                return BrowserSessionRegistry(database).authorize(
+                    browser_session_id, project_id, url=url
+                )
+            finally:
+                database.close()
     browser = CamofoxClient(
         base_url=str(browser_cfg.get("base_url", "http://localhost:9377")),
         api_key=os.environ.get("CAMOFOX_API_KEY", ""),
         timeout=float(browser_cfg.get("timeout_seconds", 15)),
+        egress_proxy_host=str(browser_cfg.get("egress_proxy_host", "")),
+        egress_proxy_port=int(browser_cfg.get("egress_proxy_port", 3129)),
+        require_egress_proxy=bool(browser_cfg.get("require_egress_proxy", False)),
+        required_camofox_version=str(browser_cfg.get("required_camofox_version", "2.4.8")),
     )
+
+    def browser_recover():
+        database = bootstrap_runtime_database()
+        try:
+            return close_revoked_browser_tabs(BrowserSessionRegistry(database), browser)
+        finally:
+            database.close()
+
+    def browser_register_tab(tab_id):
+        database = bootstrap_runtime_database()
+        try:
+            BrowserSessionRegistry(database).track_tab(browser_session_id, project_id, tab_id)
+        finally:
+            database.close()
+
+    def browser_record_tab_close(tab_id, error_class):
+        database = bootstrap_runtime_database()
+        try:
+            BrowserSessionRegistry(database).record_tab_close(
+                browser_session_id, tab_id, error_class=error_class
+            )
+        finally:
+            database.close()
+
     ctx = ToolContext(
         workspace=workspace,
         test_cmd=tuple(agent_cfg.get("test_cmd") or ("pytest", "-q")),
@@ -222,8 +263,10 @@ def _build_run_agent(cfg: dict, controls: Controls):
         ui_automation_enabled=bool(agent_cfg.get("ui_automation", True)),
         research_fn=lambda query: _agent_research(query, cfg),
         browser_client=browser,
-        browser_user_id=str(browser_cfg.get("user_id", "jarvis")),
-        browser_session_key=str(browser_cfg.get("session_key", "jarvis-agent")),
+        browser_session_authorize=browser_authorize,
+        browser_tab_registered=browser_register_tab if project_id and browser_session_id else None,
+        browser_tab_closed=browser_record_tab_close if project_id and browser_session_id else None,
+        browser_session_recover=browser_recover,
     )
     deps = AgentRunDeps(
         plan=lambda req: agent_planner.plan(req, cfg=cfg),

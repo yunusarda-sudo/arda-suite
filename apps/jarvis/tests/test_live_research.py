@@ -204,6 +204,22 @@ def test_search_to_fetch_dedupes_urls_and_content_and_preserves_provenance(fixtu
     assert result.sources[0].provenance["http_status"] == 200
 
 
+def test_live_source_acquirer_stops_when_lease_cancelled():
+    import threading
+
+    cancelled = threading.Event()
+    cancelled.set()
+
+    class Search:
+        def search(self, *_args, **_kwargs):
+            raise AssertionError("cancelled worker must not start search")
+
+    with pytest.raises(InterruptedError, match="lease lost"):
+        LiveSourceAcquirer(SafeHTTPFetcher(allow_http=True)).acquire(
+            "query", Search(), cancel_event=cancelled
+        )
+
+
 def test_live_source_feeds_m23a_evidence_with_search_provenance(fixture_server, local_validation):
     class Provider:
         name = "fixture-search"
