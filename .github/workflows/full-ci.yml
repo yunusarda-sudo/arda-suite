@@ -25,7 +25,14 @@ jobs:
       - name: Install Linux audio libraries
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libportaudio2 portaudio19-dev libsndfile1
+          sudo apt-get install --yes libportaudio2 portaudio19-dev libsndfile1 pulseaudio
+      - name: Start a headless audio server
+        # sounddevice initialises PortAudio at import time; without a sound
+        # server the runner's PulseAudio backend fails test collection.
+        run: |
+          pulseaudio --start --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=ci_null
+          pactl info
       - name: Create isolated test environments
         run: make setup-test-env
       - name: Check shell syntax
