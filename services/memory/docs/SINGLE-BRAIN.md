@@ -162,28 +162,64 @@ export MEM0_BRAIN_URL=https://<memory-host-tailnet-name>/mcp
 A typo in `MEM0_BACKEND` refuses the memory operation rather than quietly
 writing into a local store that is not the brain.
 
-## 5. Worker: Claude Desktop — TODO, unverified
+## 5. Worker: Claude Desktop (Verified)
 
-**Not yet tested.** Only the stdio form has ever been exercised on Desktop; that
-an `http` server with a `headersHelper` works in `claude_desktop_config.json` is
-an assumption, not a result. Verify before relying on it.
+Tested on **Claude Desktop (macOS, build 6.28899.x+)**.
+
+> [!IMPORTANT]
+> `claude_desktop_config.json` uses the standard Model Context Protocol (MCP) client
+> schema. It **does not support** the CLI-specific `headersHelper` parameter. If you
+> configure `"type": "http"` with a `headersHelper` directly in `claude_desktop_config.json`,
+> Claude Desktop will fail to authenticate (returning HTTP 401 Unauthorized) because the
+> Bearer token is omitted.
+
+Use one of the two verified configurations below depending on whether the brain runs locally or remotely:
+
+### Option A: Local Brain on the Same Machine (Recommended stdio)
+
+When running Claude Desktop on the same host where Shared Memory is installed:
 
 ```jsonc
 // ~/Library/Application Support/Claude/claude_desktop_config.json
 {
   "mcpServers": {
     "mem0-brain": {
-      "type": "http",
-      "url": "https://<memory-host-tailnet-name>/mcp",
-      "headersHelper": "$ARDA_SUITE_ROOT/services/memory/bin/mcp-auth-header"
+      "command": "/ABSOLUTE/PATH/TO/arda-suite/services/memory/bin/mem0-python",
+      "args": [
+        "/ABSOLUTE/PATH/TO/arda-suite/services/memory/mcp_server.py"
+      ]
     }
   }
 }
 ```
 
-If Desktop rejects it, the known-good fallbacks are its own custom-connector UI
-or an `mcp-remote` bridge passing the header — both need checking, neither is
-documented here as working.
+This runs the server over standard input/output (`stdio`) without network overhead or token management.
+
+### Option B: Remote Brain via Tailscale / HTTPS (`mcp-remote` Bridge)
+
+When connecting Claude Desktop to a remote Central Brain that requires HTTP Bearer token authentication:
+
+Use `mcp-remote` to bridge Desktop's stdio transport to the remote authenticated HTTP endpoint:
+
+```jsonc
+// ~/Library/Application Support/Claude/claude_desktop_config.json
+{
+  "mcpServers": {
+    "mem0-brain": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "https://<memory-host-tailnet-name>/mcp",
+        "--header",
+        "Authorization: Bearer <TOKEN>"
+      ]
+    }
+  }
+}
+```
+
+*Replace `<memory-host-tailnet-name>` with your verified Tailscale hostname and `<TOKEN>` with your private 0600 token from `~/.mem0/mcp-token`.* Never commit this file or expose the bearer token.
 
 ## 6. Dashboard: SSH tunnel only
 

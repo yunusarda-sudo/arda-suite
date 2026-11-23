@@ -297,6 +297,6 @@ def build_server(fastmcp_cls, name, argv=None, env=None):
         host=host,
         port=port,
         token_verifier=MultiTokenVerifier(tokens),
-        auth=AuthSettings(issuer_url=base, resource_server_url=base),
+        auth=AuthSettings(issuer_url=base, resource_server_url=base, validate_token_resource=False),
         transport_security=_transport_security(host, port, env),
     )

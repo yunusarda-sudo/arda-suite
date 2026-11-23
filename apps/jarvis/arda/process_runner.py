@@ -80,7 +80,11 @@ class ManagedProcessRunner:
                     self._terminate(proc)
                     break
                 time.sleep(self._poll_interval)
-            stdout, stderr = proc.communicate(timeout=self._grace_period)
+            try:
+                stdout, stderr = proc.communicate(timeout=self._grace_period)
+            except subprocess.TimeoutExpired:
+                self._signal_group(proc, signal.SIGKILL)
+                stdout, stderr = proc.communicate()
             if interrupted:
                 reason = "cancelled" if self._should_cancel() else "timed_out"
                 stderr = (stderr or "") + f"\nprocess terminated: {reason}"
