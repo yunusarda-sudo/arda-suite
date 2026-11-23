@@ -46,8 +46,7 @@ For people connecting assistants and other devices to Shared Memory:
 
 - [One brain, many workers](../services/memory/docs/SINGLE-BRAIN.md): remote
   MCP clients, bearer tokens, host checks, and dashboard access through an SSH
-  tunnel. The guide marks Tailscale Serve activation and Claude Desktop HTTP
-  configuration as unverified.
+  tunnel, including verified Claude Desktop configurations.
 - [iOS and Siri Shortcuts](../services/memory/docs/SIRI-SHORTCUTS.md): Turkish
   examples for asking and remembering through the dashboard API. Read these
   alongside the security policy: the dashboard must remain on loopback, so
