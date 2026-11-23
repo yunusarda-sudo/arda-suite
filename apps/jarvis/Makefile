@@ -66,7 +66,7 @@ run:  ## Uygulamayı başlat (mikrofon + Ollama + STT modeli: parakeet/whisper g
 	$(PY) -m arda
 
 compile:  ## Tüm modüllerin derlendiğini doğrula
-	$(PY) -m py_compile arda/*.py
+	$(PY) -m compileall -q arda
 
 install:  ## Paketi düzenlenebilir kur (sonra `arda` komutu kullanılabilir)
 	$(PY) -m pip install -e .

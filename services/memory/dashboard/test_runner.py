@@ -704,9 +704,12 @@ class ChainFixture(RunnerFixture):
         return runner.latest(self.arch_id) or {}
 
     def wait_quiet(self, timeout=15):
-        """Wait until nothing is running and the last run has a chain verdict."""
+        """Wait until nothing is running and the last run has a final chain verdict."""
         wait_for(lambda: (self.record().get("status") in runner.TERMINAL
-                          and self.record().get("chain_next")), timeout=timeout)
+                          and self.record().get("chain_next")
+                          and self.record().get("chain_next") != "starting the next run"
+                          and not runner.active(self.arch_id)), timeout=timeout)
+        runner.wait_for_supervisors(self.arch_id, timeout=timeout)
         return self.record()
 
 
@@ -1321,8 +1324,11 @@ class TestAuditMode(AuditFixture):
     def test_the_chain_still_stops_at_the_gate_after_an_audit(self):
         self.open_task()
         arch.set_auto_chain(self.gate_id, True)
-        record = self.run_to_completion(arch_id=self.gate_id)
-        self.assertIn("manual phase", record["chain_next"] or "")
+        self.run_to_completion(arch_id=self.gate_id)
+        wait_for(lambda: (runner.latest(self.gate_id) or {}).get("chain_next"), timeout=15)
+        runner.wait_for_supervisors(self.gate_id, timeout=15)
+        record = runner.latest(self.gate_id) or {}
+        self.assertIn("manual phase", record.get("chain_next") or "")
 
 
 class TestRunHistoryIsDeletedWithTheArchitecture(RunnerFixture):

@@ -44,6 +44,9 @@ OPTIONS = {
         # Mikrofon izni penceresi bu açıklamayla çıkar (zorunlu — yoksa erişim reddedilir).
         "NSMicrophoneUsageDescription":
             f"{ASSISTANT_NAME}, ⌘⇧A'ya bastığınızda sizi dinleyip yanıtlamak için mikrofona erişir.",
+        # AppleEvents izni: dikte metnini imlece yapıştırmak için System Events kontrolü.
+        "NSAppleEventsUsageDescription":
+            f"{ASSISTANT_NAME}, dikte metnini imlece yapıştırmak ve sistem komutlarını yürütmek için AppleEvents kullanır.",
     },
 }
 

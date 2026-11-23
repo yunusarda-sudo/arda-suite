@@ -58,7 +58,14 @@ cat <<'EOF' > "$MACOS_DIR/SharedBrain"
 set -e
 
 # Resolve project repository directory
-DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
+BUNDLE_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+DIR="$(cd "$BUNDLE_ROOT/.." && pwd)"
+if [ ! -f "$DIR/dashboard/server.py" ]; then
+    DIR="$(cd "$BUNDLE_ROOT/../.." && pwd)"
+fi
+if [ ! -f "$DIR/dashboard/server.py" ] && [ -n "${MEM0_ROOT:-}" ]; then
+    DIR="$MEM0_ROOT"
+fi
 if [ ! -f "$DIR/dashboard/server.py" ]; then
     DIR="$HOME/mem0-local"
 fi

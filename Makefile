@@ -22,5 +22,8 @@ test-memory:
 
 check-shell:
 	bash -n apps/jarvis/install.sh
-	bash -n apps/jarvis/scripts/install_rpi_service.sh
-	bash -n services/memory/scripts/install-pi.sh
+	bash -n apps/jarvis/scripts/*.sh
+	bash -n services/memory/scripts/*.sh
+	bash -n services/memory/*.sh
+	bash -n services/memory/dashboard/*.sh
+	sh -n services/memory/bin/*
