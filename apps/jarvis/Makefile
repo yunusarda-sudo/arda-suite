@@ -17,7 +17,7 @@ VOSK_URL       := https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.1
 
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-v run compile install clean setup models models-vosk app app-clean dmg release-macos check-wake doctor rpi-check rpi-e2e-check install-rpi-service rpi-status rpi-logs rpi-start rpi-stop rpi-restart rpi-listen
+.PHONY: help test test-v run compile install clean setup models models-vosk app app-clean dmg release-macos check-wake doctor rpi-check rpi-e2e-check rpi-recovery-rehearsal install-rpi-service rpi-status rpi-logs rpi-start rpi-stop rpi-restart rpi-listen
 
 doctor:  ## platform, ses, STT ve Ollama durumunu denetle
 	@$(PY) -c "from arda.permissions import permission_report; print(permission_report())"
@@ -33,6 +33,9 @@ rpi-check:  ## Linux/RPi kurulum ön koşullarını değişiklik yapmadan denetl
 
 rpi-e2e-check:  ## Linux/RPi servis + Ollama + Qdrant smoke kontrolü
 	./scripts/rpi_e2e_smoke.sh
+
+rpi-recovery-rehearsal:  ## Linux/RPi arda.recovery yedekleme/geri yükleme provası
+	./scripts/rpi_recovery_rehearsal.sh $(ARGS)
 
 rpi-status:  ## Linux/RPi Jarvis servis durumunu göster
 	./scripts/jarvisctl status
