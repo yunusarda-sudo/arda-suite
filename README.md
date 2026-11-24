@@ -12,7 +12,7 @@
 
 ---
 
-**AegisOS** is a modular, local-first AI assistant and bounded agent runtime. It bridges the gap between **user intent and safe execution**—combining a macOS desktop voice assistant, explicit human-in-the-loop permission boundaries, and an independent shared memory daemon.
+**AegisOS** is a local-first desktop assistant and bounded agent runtime for macOS and Linux. It handles everyday workflows through push-to-talk voice commands, cursor-level dictation, and Obsidian task sync, while ensuring autonomous agent actions run within strict permission boundaries and persistent memory.
 
 Each component is independently deployable with its own Python environment and isolated lifecycle.
 
