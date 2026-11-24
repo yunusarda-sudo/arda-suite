@@ -43,8 +43,9 @@ Hardware-specific constraints (ARM64 memory pressure, Pi systemd user-session pe
 
 | Check | Acceptance Criteria | Target Status |
 | :--- | :--- | :--- |
-| `pi-recovery-backup` | `python3 -m arda.recovery backup` produces verified manifest and artifact hashes | PENDING |
-| `pi-recovery-restore` | Restore to isolated target matches source SQLite state and passes integrity check | PENDING |
+| `rehearsal-runner` | `scripts/rpi_recovery_rehearsal.sh` automates backup, hash verification, and integrity check | VERIFIED (PASS in sandbox) |
+| `pi-recovery-backup` | `python3 -m arda.recovery backup` produces verified manifest and artifact hashes on Pi | PENDING (Host execution) |
+| `pi-recovery-restore` | Restore to isolated target matches source SQLite state and passes integrity check | PENDING (Host execution) |
 | `pi-systemd-lifecycle` | Services start on boot, cleanly stop on `SIGTERM`, release all DB locks | PENDING |
 | `pi-headless-audio` | Vosk engine detects wake-word with CPU usage < 25% on Pi 4/5 idle | PENDING |
 | `pi-loopback-boundary` | External ports remain closed; loopback accessible only via authenticated tunnel | PENDING |
