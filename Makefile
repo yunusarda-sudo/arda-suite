@@ -1,4 +1,12 @@
-.PHONY: test test-jarvis test-memory setup-test-env check-shell
+.PHONY: help test test-jarvis test-memory setup-test-env check-shell
+
+help:
+	@echo "ARDA Suite Makefile Targets:"
+	@echo "  make setup-test-env  - Create virtual environments and install dependencies"
+	@echo "  make test            - Run all Jarvis and Shared Memory test suites"
+	@echo "  make test-jarvis     - Run Jarvis test suite"
+	@echo "  make test-memory     - Run Shared Memory test suite"
+	@echo "  make check-shell     - Syntax check shell scripts across the project"
 
 JARVIS_PYTHON ?= $(CURDIR)/apps/jarvis/.venv/bin/python
 MEMORY_PYTHON ?= $(CURDIR)/services/memory/.venv/bin/python
