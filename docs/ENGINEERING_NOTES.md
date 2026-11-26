@@ -43,3 +43,22 @@ flowchart TD
 - **Shared Memory MCP Transport**: HTTP MCP and dashboard listeners bind to loopback (`127.0.0.1`) by default. HTTP MCP requires bearer-token authentication. See [SECURITY.md](../SECURITY.md) and [mcp_transport.py](../services/memory/mcp_transport.py).
 - **Privacy by Default**: Model execution defaults to local Ollama. Cloud LLM providers are strictly opt-in.
 - **Data Exclusion**: Private memory databases, Qdrant vectors, auth tokens, model weights, and machine-specific configs are excluded from Git tracking.
+
+---
+
+## Resilient Agent Lifecycle Patterns
+
+ARDA Suite incorporates defensive runtime patterns adapted from production open-source agent runtimes:
+
+1. **Fast-Path / Slow-Path Intent Routing**:
+   Deterministic commands (time checks, exact tool dispatches, status probes) bypass model inference using zero-allocation keyword matching before escalating to full LLM evaluation.
+
+2. **Singleton Daemon Spawner & Startup Crash Preservation**:
+   Background processes (memory service, local listeners) synchronize startup behind an async mutex (`_spawn_lock`). On startup, non-empty previous logs are rotated to `.log.1` rather than truncated, preserving crash backtraces across unexpected process exits.
+
+3. **Structured Tool Denial Recovery**:
+   When a user denies a high-risk tool approval (`CONFIRM -> DENIED`), the executor does not terminate the conversation; instead, it injects a structured denial outcome (`{ status: "denied_by_user", reason: ... }`) back into the planner to let the agent formulate an alternative path.
+
+4. **Deterministic Exit Hierarchy**:
+   Subprocess scripts and CLI entrypoints enforce strict Unix exit code semantics (`0` = success, `1` = clean empty result/no match, `2` = syntax/usage error).
+
